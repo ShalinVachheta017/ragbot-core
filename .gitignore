@@ -1,0 +1,30 @@
+# === Private data folders ===
+data/
+extractdirect/
+metadata/
+logs/
+chroma_db/
+Test Data of Tender Files/
+
+# === Python artifacts ===
+__pycache__/
+*.pyc
+
+# === System files ===
+.DS_Store
+Thumbs.db
+
+# === Virtual environments ===
+.venv/
+env/
+venv/
+
+# === Secrets and models ===
+.env
+*.bin
+*.pt
+*.onnx
+
+# === VS Code / JetBrains / PyCharm IDE ===
+.vscode/
+.idea/

@@ -1,0 +1,18 @@
+version: '3.5'
+services:
+  milvus-standalone:
+    container_name: milvus
+    image: milvusdb/milvus:v2.3.15
+    restart: unless-stopped
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+volumes:
+  milvus_data:
