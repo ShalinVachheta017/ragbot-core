@@ -1,10 +1,18 @@
-# from pathlib import Path
+from sentence_transformers import SentenceTransformer
+from qdrant_client import QdrantClient
 
-# pdfs = list(Path("extractdirect").rglob("*.pdf"))
-# print(f"Found: {len(pdfs)} PDF files")
-# for f in pdfs[:5]:
-#     print(f)
-from langchain_community.vectorstores import Chroma
+client = QdrantClient(url="http://127.0.0.1:6333")
+model = SentenceTransformer("intfloat/multilingual-e5-small")
 
-db = Chroma(persist_directory="chroma_db")
-print(f"✅ Total embedded chunks: {db._collection.count()}")
+q = "construction contract draft"
+vec = model.encode(f"query: {q}", normalize_embeddings=True).tolist()
+
+res = client.query_points(
+    collection_name="tender_chunks",
+    query=vec,
+    with_payload=True,
+    limit=5
+)
+
+for p in res.points:
+    print(round(p.score, 4), p.payload.get("source"))

@@ -1,21 +1,23 @@
-# === Core GPU + Transformers ===
-transformers==4.42.4
-sentence-transformers==3.0.1
+# === Vector DB + Embeddings ===
+qdrant-client>=1.8.4,<1.10
 
-# === RAG Pipeline ===
-langchain==0.2.11
-langchain-community
-langchain-chroma
-chromadb==0.5.0
-weaviate-client==4.5.3
-openpyxl==3.1.2
-fastapi==0.111.1
-pytesseract==0.3.10
+# SentenceTransformer stack (GPU/CPU works; uses your installed torch)
+sentence-transformers>=3.0.1
+transformers>=4.40,<5
+# Pin torch to a safe band; install the CUDA build if you have NVIDIA GPU
 
-# === Utilities ===
-python-magic-bin==0.4.14
-tqdm==4.66.2
-langdetect==1.0.9
-prometheus-client==0.20.0
-tenacity==8.2.3
-python-dotenv==1.0.1
+
+# === Data / PDF / utils ===
+numpy>=1.24,<3
+pandas>=2.2
+openpyxl>=3.1
+pymupdf>=1.24
+tqdm>=4.66
+langdetect>=1.0.9
+
+# Windows magic for filetype sniffing (safe no-op on non-Windows)
+python-magic-bin==0.4.14 ; sys_platform == "win32"
+
+# Optional: if you run an API later, uncomment these
+# fastapi>=0.111
+# uvicorn[standard]>=0.30
