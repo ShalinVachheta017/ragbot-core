@@ -11,7 +11,7 @@ from multiprocessing import Pool, Queue, cpu_count, Process
 from datetime import datetime
 import magic, langdetect
 from tqdm import tqdm
-from manifest import seen, record        # unchanged helper
+from .manifest import seen, record        # unchanged helper
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────
 SRC_ROOT     = pathlib.Path("data/raw")       # <— where your ZIP folders live

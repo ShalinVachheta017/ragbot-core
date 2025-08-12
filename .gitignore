@@ -1,30 +1,58 @@
 # === Private data folders ===
 data/
 extractdirect/
-metadata/
+_corrupt/
+.qodo/
+
+# === Logs & analytics ===
 logs/
-chroma_db/
-Test Data of Tender Files/
+*.log
+metadata/ingest_log_*.csv
+embed_chunks_*.log
+data_preparation.log
+parse_excel.log
+
+# === Derived metadata / DBs (contain sensitive or re-buildable data) ===
+metadata/cleaned_metadata.csv
+metadata/cleaned_metadata.xlsx
+metadata/manifest.db
+*.sqlite
+*.db
+processed_hashes.json
+
+# If you ever mount Qdrant storage to a local path, ignore it
+qdrant_storage/
 
 # === Python artifacts ===
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 
-# === System files ===
-.DS_Store
-Thumbs.db
-
-# === Virtual environments ===
+# === Environments ===
 .venv/
-env/
 venv/
+env/
 
-# === Secrets and models ===
+# === Secrets / models (don’t commit local model weights or keys) ===
 .env
 *.bin
 *.pt
 *.onnx
 
-# === VS Code / JetBrains / PyCharm IDE ===
+# === OS cruft ===
+.DS_Store
+Thumbs.db
+
+# === Editors / IDE ===
 .vscode/
 .idea/
+
+# === Temp / cache ===
+*.tmp
+*.bak
+*.swp
+
+
+/Test\ Data\ of\ Tender\ Files/
+/notes.txt
