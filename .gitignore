@@ -52,3 +52,7 @@ Thumbs.db
 *.tmp
 *.bak
 *.swp
+
+
+/Test\ Data\ of\ Tender\ Files/
+/notes.txt
