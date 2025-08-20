@@ -1,7 +1,7 @@
 
-# 📚 VergabeNerd – Local Multilingual RAGbot
+# 📚Local Multilingual RAGbot
 
-**VergabeNerd** is a Retrieval-Augmented Generation (RAG) system built to process and analyze **German public tender documents** (Vergabeunterlagen) with multilingual support.
+**RAGbot** is a Retrieval-Augmented Generation (RAG) system built to process and analyze **German public tender documents** (Vergabeunterlagen) with multilingual support.
 It enables users to query unstructured procurement data and receive **structured, explainable, source-cited answers** in an intuitive UI.
 
 This project runs **fully offline** on your local machine using **Qdrant** (vector DB), **LangChain** pipeline, **cross-encoder reranking**, and **LLMs via Ollama**.
