@@ -1,4 +1,4 @@
-# ---- Vector DB ----
+#---- Vector DB ----
 qdrant-client>=1.9,<2.0
 
 # SentenceTransformer stack (GPU/CPU works; uses your installed torch)
@@ -23,3 +23,6 @@ python-magic-bin==0.4.14 ; sys_platform == "win32"
 # ---- LLM / UI ----
 ollama>=0.3.0
 streamlit>=1.36.0
+
+# Optional OCR for scanned PDFs (enable later if needed)
+# pytesseract

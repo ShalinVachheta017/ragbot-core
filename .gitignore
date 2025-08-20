@@ -1,58 +1,35 @@
-# === Private data folders ===
-data/
-extractdirect/
-_corrupt/
-.qodo/
-
-# === Logs & analytics ===
-logs/
-*.log
-metadata/ingest_log_*.csv
-embed_chunks_*.log
-data_preparation.log
-parse_excel.log
-
-# === Derived metadata / DBs (contain sensitive or re-buildable data) ===
-metadata/cleaned_metadata.csv
-metadata/cleaned_metadata.xlsx
-metadata/manifest.db
-*.sqlite
-*.db
-processed_hashes.json
-
-# If you ever mount Qdrant storage to a local path, ignore it
-qdrant_storage/
-
-# === Python artifacts ===
+@'
+# venv / editors / OS
+venv/
+.venv/
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
+.ipynb_checkpoints/
+.DS_Store
 
-# === Environments ===
-.venv/
-venv/
-env/
+# data & outputs
+data/
+extractdirect/
+logs/
+processed_hashes.json
+metadata/cleaned_metadata.*
+metadata/ingest_log_*.csv
+manifest.db
 
-# === Secrets / models (don’t commit local model weights or keys) ===
-.env
-*.bin
+# caches
+.cache/
+.huggingface/
+*.safetensors
 *.pt
+*.bin
 *.onnx
 
-# === OS cruft ===
-.DS_Store
-Thumbs.db
-
-# === Editors / IDE ===
-.vscode/
-.idea/
-
-# === Temp / cache ===
-*.tmp
-*.bak
-*.swp
+# local config
+.env
+.env.local
+'@ | Out-File -Encoding utf8 .gitignore
 
 
 /Test\ Data\ of\ Tender\ Files/
 /notes.txt
+how_what_why.ipynb

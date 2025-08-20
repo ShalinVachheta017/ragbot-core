@@ -1,259 +1,242 @@
+# scripts/embed_chunks_qdrant.py
 """
-Batch embeddings of tender documents (PDFs) using recursive ZIP extraction,
-GPU-accelerated embedding, duplicate skipping using content hash,
-and Qdrant vector DB backend.
+Embeds PDFs from EXTRACT_DIR into Qdrant.
+Adds Excel fields to payload if metadata/cleaned_metadata.xlsx exists.
+Logs -> logs/embed_chunks_qdrant.log
+Env flags:
+  FORCE_REEMBED=1  (ignore processed_hashes.json and re-embed)
 """
-
-from __future__ import annotations
 
 import os
-import sys
-import zipfile
-import shutil
-import logging
-import hashlib
 import json
+import time
+import hashlib
+import logging
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
-from typing import List, Dict
-from uuid import uuid4
+from typing import List, Dict, Any, Optional
+import uuid
 
+
+import fitz  # PyMuPDF
 from tqdm import tqdm
+from langdetect import detect
+from sentence_transformers import SentenceTransformer
+import pandas as pd
 
-# ---- LangChain + PDF + Embeddings
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.document_loaders import PyMuPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct
 
-# ---- Qdrant
-from qdrant_client import QdrantClient, models
-
-# ---- Config (project-local)
-from .config import (
-    EXTRACT_DIR,
-    ROOT_DIR,
-    EMBED_MODEL_NAME,
-    CHUNK_SIZE,
-    CHUNK_OVERLAP,
-)
-
-# =============================================================================
-# Logging (file + quiet console)
-# =============================================================================
-from logging.handlers import RotatingFileHandler
-
-LOG_DIR = ROOT_DIR / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+# ---------- Logging ----------
+LOG_DIR = Path("logs"); LOG_DIR.mkdir(exist_ok=True)
 LOG_FILE = LOG_DIR / "embed_chunks_qdrant.log"
 
-_fmt = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-formatter = logging.Formatter(_fmt)
+logger = logging.getLogger("embed_qdrant")
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    fh = TimedRotatingFileHandler(LOG_FILE, when="midnight", backupCount=7, encoding="utf-8")
+    fh.setFormatter(fmt); fh.setLevel(logging.INFO)
+    ch = logging.StreamHandler(); ch.setFormatter(fmt); ch.setLevel(logging.INFO)
+    logger.addHandler(fh); logger.addHandler(ch)
 
-file_handler = RotatingFileHandler(
-    LOG_FILE, maxBytes=10_000_000, backupCount=3, encoding="utf-8"
-)
-file_handler.setLevel(logging.INFO)
-file_handler.setFormatter(formatter)
+# ---------- Config ----------
+try:
+    from .config import (
+        EXTRACT_DIR,
+        COLLECTION_NAME as CFG_COLLECTION,
+        EMBED_MODEL_NAME as CFG_EMBED,
+        CHUNK_SIZE,
+        CHUNK_OVERLAP,
+        CLEANED_EXCEL,
+    )
+except Exception:
+    EXTRACT_DIR = Path("extractdirect")
+    CFG_COLLECTION = "tender_docs"
+    CFG_EMBED = "intfloat/multilingual-e5-small"
+    CHUNK_SIZE = 1000
+    CHUNK_OVERLAP = 200
+    CLEANED_EXCEL = Path("metadata/cleaned_metadata.xlsx")
 
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.WARNING)  # WARN+ to terminal
-console_handler.setFormatter(formatter)
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", CFG_COLLECTION)
+EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", CFG_EMBED)
+FORCE_REEMBED = bool(int(os.getenv("FORCE_REEMBED", "0")))
+BATCH_SIZE = int(os.getenv("EMBED_BATCH", "64"))
 
-logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler])
+PROCESSED_HASHES = Path("processed_hashes.json")
 
-logger = logging.getLogger("embed_chunks_qdrant")
-logging.getLogger("qdrant_client").setLevel(logging.INFO)
-logging.getLogger("httpx").setLevel(logging.WARNING)
+# ---------- Excel metadata ----------
+def _normalize_fn(x: str) -> str:
+    return Path(str(x)).name.lower()
 
-# =============================================================================
-# Settings
-# =============================================================================
-COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "tender_chunks")
-QDRANT_HOST = os.getenv("QDRANT_HOST", "127.0.0.1")
-QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
+def _load_excel_map(path: Path) -> Optional[Dict[str, Dict[str, Any]]]:
+    try:
+        if not path.exists():
+            logger.warning("No cleaned Excel at %s (payloads will omit Excel fields)", path)
+            return None
+        df = pd.read_excel(path) if path.suffix.lower() == ".xlsx" else pd.read_csv(path)
+        if "filename" not in df.columns:
+            logger.warning("Cleaned Excel missing 'filename'; ignoring.")
+            return None
+        df.columns = [c.strip() for c in df.columns]
+        keep_cols = [c for c in df.columns if c != "filename"]
+        mapping = {}
+        for _, row in df.iterrows():
+            mapping[_normalize_fn(row["filename"])] = {c: row[c] for c in keep_cols}
+        logger.info("Loaded Excel metadata rows: %d", len(mapping))
+        return mapping
+    except Exception as e:
+        logger.error("Failed to read cleaned Excel %s: %s", path, e)
+        return None
 
-RAW_DIR = ROOT_DIR / "data" / "raw"
-HASH_FILE = ROOT_DIR / "processed_hashes.json"
+# ---------- Helpers ----------
+def load_processed() -> Dict[str, str]:
+    if PROCESSED_HASHES.exists():
+        try:
+            return json.loads(PROCESSED_HASHES.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
 
-BATCH_EMBED = int(os.getenv("BATCH_EMBED", "256"))
-BATCH_UPSERT = int(os.getenv("BATCH_UPSERT", "256"))
+def save_processed(d: Dict[str, str]):
+    PROCESSED_HASHES.write_text(json.dumps(d, indent=2), encoding="utf-8")
 
-# =============================================================================
-# Helpers
-# =============================================================================
-def get_file_hash(path: Path) -> str:
+def file_hash(p: Path) -> str:
     h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
+    with p.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
 
+def read_pdf_text(pdf_path: Path) -> str:
+    doc = fitz.open(pdf_path)
+    parts = []
+    for page in doc:
+        parts.append(page.get_text("text"))
+    doc.close()
+    return "\n".join(parts)
 
-def load_or_init_hashes() -> set[str]:
-    if HASH_FILE.exists():
-        try:
-            with open(HASH_FILE, "r", encoding="utf-8") as f:
-                return set(json.load(f))
-        except Exception:
-            logger.warning("Could not read processed_hashes.json — starting fresh")
-    return set()
+def chunk_text(text: str, chunk_size: int, overlap: int) -> List[str]:
+    text = " ".join(text.split())
+    if not text:
+        return []
+    chunks = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(n, start + chunk_size)
+        chunks.append(text[start:end])
+        if end == n:
+            break
+        start = max(0, end - overlap)
+    return chunks
 
-
-def save_hashes(hashes: set[str]) -> None:
-    with open(HASH_FILE, "w", encoding="utf-8") as f:
-        json.dump(sorted(list(hashes)), f, indent=2)
-
-
-def pick_device() -> str:
+def ensure_collection(client: QdrantClient, dim: int):
     try:
-        import torch  # type: ignore
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    except Exception:
-        return "cpu"
-
-
-# =============================================================================
-# Main
-# =============================================================================
-def main() -> None:
-    logger.info("=== Embedding pipeline (Qdrant) starting ===")
-
-    # ----- Qdrant client (fail fast if not reachable)
-    client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, prefer_grpc=False)
-    try:
-        _ = client.get_collections()
-        logger.info(f"Connected to Qdrant at {QDRANT_HOST}:{QDRANT_PORT}")
+        client.create_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
+        )
+        logger.info("Created collection %s (dim=%s)", COLLECTION_NAME, dim)
     except Exception as e:
-        logger.error("Cannot reach Qdrant. Is the container up? (docker compose up -d)")
-        raise
+        if "exists" in str(e).lower():
+            pass
+        else:
+            raise
 
-    # ----- Find ZIPs
-    zip_files = sorted(RAW_DIR.rglob("*.zip"))
-    logger.info(f"Found {len(zip_files)} zip files recursively in {RAW_DIR}")
+def deterministic_point_id(pdf_name: str, doc_hash: str, chunk_index: int) -> str:
+    name = f"{pdf_name}|{doc_hash}|{chunk_index}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, name))  
 
-    # ----- Clean + extract
-    shutil.rmtree(EXTRACT_DIR, ignore_errors=True)
-    EXTRACT_DIR.mkdir(parents=True, exist_ok=True)
+def upsert_batch(client: QdrantClient, vectors: List[List[float]], payloads: List[Dict[str, Any]]):
+    points = []
+    for v, pl in zip(vectors, payloads):
+        points.append(PointStruct(id=pl["point_id"], vector=v, payload=pl))
+    client.upsert(collection_name=COLLECTION_NAME, points=points)
 
-    for zip_path in tqdm(zip_files, desc="Unzipping ZIPs", unit="zip"):
-        try:
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                zf.extractall(EXTRACT_DIR / zip_path.stem)
-        except zipfile.BadZipFile:
-            logger.warning(f"Bad zip skipped: {zip_path}")
-
-    # ----- Discover PDFs
-    pdf_paths = sorted(EXTRACT_DIR.rglob("*.pdf"))
-    logger.info(f"Found {len(pdf_paths)} PDFs to process")
-
-    # ----- Load/Chunk settings
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
-        separators=["\n\n", "\n", " ", ""],
-    )
-
-    # ----- Hash cache (skip already-done PDFs)
-    seen_hashes = load_or_init_hashes()
-    new_hashes: set[str] = set()
-
-    texts: List[str] = []
-    metas: List[Dict] = []
-
-    for pdf_path in tqdm(pdf_paths, desc="Chunking PDFs", unit="pdf"):
-        pdf_hash = get_file_hash(pdf_path)
-        if pdf_hash in seen_hashes:
-            logger.info(f"⏭️  Skip already-embedded PDF: {pdf_path.name}")
-            continue
-
-        try:
-            pages = PyMuPDFLoader(str(pdf_path)).load()
-        except Exception as e:
-            logger.warning(f"Failed to read PDF {pdf_path.name}: {e}")
-            continue
-
-        chunks = splitter.split_documents(pages)
-        for i, ch in enumerate(chunks):
-            meta = ch.metadata.copy()
-            meta["source"] = str(pdf_path.relative_to(ROOT_DIR))
-            meta["chunk_index"] = i
-            meta["doc_hash"] = pdf_hash
-            meta["text"] = ch.page_content  # keep text in payload for retrieval
-
-            texts.append(ch.page_content)
-            metas.append(meta)
-
-        new_hashes.add(pdf_hash)
-
-    logger.info(f"Prepared {len(texts)} chunks for embedding")
-
-    if not texts:
-        logger.info("Nothing to embed. Exiting.")
+# ---------- Main ----------
+def main():
+    t0 = time.time()
+    extract_dir = Path(EXTRACT_DIR)
+    if not extract_dir.exists():
+        logger.error("EXTRACT_DIR not found: %s", extract_dir)
         return
 
-    # ----- Embeddings (GPU if available)
-    device = pick_device()
-    logger.info(f"Loading embedding model on device: {device}")
-    embedder = HuggingFaceEmbeddings(
-        model_name=EMBED_MODEL_NAME, model_kwargs={"device": device}
-    )
-    dim = len(embedder.embed_query("dimension_probe"))
-    logger.info(f"Model loaded: {EMBED_MODEL_NAME} (dim={dim})")
+    embedder = SentenceTransformer(EMBED_MODEL_NAME)
+    dim = embedder.get_sentence_embedding_dimension()
+    client = QdrantClient(url=QDRANT_URL)
+    ensure_collection(client, dim)
 
-    # ----- Ensure collection
-    try:
-        client.get_collection(COLLECTION_NAME)
-        logger.info(f"Collection exists: {COLLECTION_NAME}")
-    except Exception:
-        logger.info(f"Creating collection: {COLLECTION_NAME}")
-        client.recreate_collection(
-            collection_name=COLLECTION_NAME,
-            vectors_config=models.VectorParams(
-                size=dim,
-                distance=models.Distance.COSINE,
-                on_disk=True,  # store vectors on disk for larger-than-RAM
-            ),
-        )
+    excel_map = _load_excel_map(Path(CLEANED_EXCEL))
 
-    # ----- Embed + upsert in batches
-    total = len(texts)
-    upserted = 0
+    processed = load_processed()
+    pdfs = sorted(extract_dir.rglob("*.pdf"))
+    logger.info("Found %d PDFs under %s", len(pdfs), extract_dir.resolve())
+    if not pdfs:
+        return
 
-    for i in tqdm(range(0, total, BATCH_EMBED), desc="Embedding", unit="chunk"):
-        batch_texts = texts[i : i + BATCH_EMBED]
-        batch_metas = metas[i : i + BATCH_EMBED]
+    total_chunks = 0
+    updated_files = 0
+    skipped_files = 0
 
-        vectors = embedder.embed_documents(batch_texts)
+    for pdf in tqdm(pdfs, desc="Embedding PDFs"):
+        h = file_hash(pdf)
+        if not FORCE_REEMBED and processed.get(str(pdf)) == h:
+            skipped_files += 1
+            logger.info("Skip unchanged: %s", pdf.name)
+            continue
 
-        # upsert in smaller shards if you like
-        for j in range(0, len(vectors), BATCH_UPSERT):
-            vecs = vectors[j : j + BATCH_UPSERT]
-            payl = batch_metas[j : j + BATCH_UPSERT]
+        try:
+            text = read_pdf_text(pdf)
+        except Exception as e:
+            logger.error("Failed to read %s: %s", pdf, e)
+            continue
 
-            points = [
-                models.PointStruct(id=uuid4().hex, vector=v, payload=p)
-                for v, p in zip(vecs, payl)
-            ]
-            client.upsert(
-                collection_name=COLLECTION_NAME,
-                points=points,
-                wait=True,
-            )
+        chunks = chunk_text(text, CHUNK_SIZE, CHUNK_OVERLAP)
+        if not chunks:
+            logger.info("No text in %s", pdf.name)
+            processed[str(pdf)] = h
+            save_processed(processed)
+            continue
 
-            upserted += len(points)
+        base = excel_map.get(_normalize_fn(pdf.name), {}) if excel_map else {}
+        payloads = []
+        for i, ch in enumerate(chunks):
+            try:
+                lang = detect(ch[:5000])
+            except Exception:
+                lang = "unknown"
 
-    logger.info(f"✅ Embedded {upserted} chunks to Qdrant collection: {COLLECTION_NAME}")
+            pl = {
+                "point_id": deterministic_point_id(pdf.name, h, i),
+                "text": ch,
+                "source": pdf.name,
+                "path": str(pdf.resolve()),
+                "chunk_index": i,
+                "lang": lang,
+            }
+            for k, v in base.items():
+                if pd.isna(v): 
+                    continue
+                pl[k] = v
+            payloads.append(pl)
 
-    # ----- Save new hashes
-    seen_hashes.update(new_hashes)
-    save_hashes(seen_hashes)
-    logger.info("💾 Updated processed_hashes.json")
+        # Embed & upsert in batches
+        for i in range(0, len(chunks), BATCH_SIZE):
+            seg = chunks[i : i + BATCH_SIZE]
+            vecs = embedder.encode(seg, normalize_embeddings=True).tolist()
+            upsert_batch(client, vecs, payloads[i : i + BATCH_SIZE])
 
-    logger.info("=== Embedding pipeline finished ===")
+        processed[str(pdf)] = h
+        save_processed(processed)
+        total_chunks += len(chunks)
+        updated_files += 1
+        logger.info("Upserted %d chunks from %s", len(chunks), pdf.name)
 
+    dur = time.time() - t0
+    logger.info("✅ Done. Files processed: %d (updated=%d, skipped=%d), Chunks: %d, Time: %.1fs",
+                len(pdfs), updated_files, skipped_files, total_chunks, dur)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        logger.warning("Interrupted by user")
-        sys.exit(1)
+    main()
