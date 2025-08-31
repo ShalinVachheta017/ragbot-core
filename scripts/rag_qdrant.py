@@ -1,15 +1,7 @@
-"""
-Lightweight retrieval helpers for Qdrant + multilingual E5 embeddings.
-
-- Uses Qdrant Query API (`query_points`) with qdrant-client >= 1.9
-- Embeddings: intfloat/multilingual-e5-small (great multilingual recall)
-- Returns simple `Hit` objects with text, source, score
-"""
-
+# rag_qdrant.py
 from __future__ import annotations
 
-import logging
-import os
+import logging, os, re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -17,31 +9,26 @@ from typing import List, Optional
 from qdrant_client import QdrantClient, models
 from sentence_transformers import SentenceTransformer
 
-# ---------- Config ----------
+# --- Config (env with sane defaults) ---
 ROOT_DIR = Path(__file__).resolve().parents[1]
 QDRANT_URL = os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
-QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "tender_chunks")
-
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "tender_docs")
 EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "intfloat/multilingual-e5-small")
 NORMALIZE_EMBEDDINGS = True
+DEFAULT_TOP_K = int(os.getenv("RAG_TOP_K", "8"))
 
-DEFAULT_TOP_K = int(os.getenv("RAG_TOP_K", "5"))
-
-# ---------- Logging ----------
 logger = logging.getLogger("rag_qdrant")
 if not logger.handlers:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(message)s",
-    )
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
-# ---------- Singletons ----------
 _client: Optional[QdrantClient] = None
 _embedder: Optional[SentenceTransformer] = None
 
+# Detect 8-digit DTAD IDs in the query
+DTAD_RE = re.compile(r"\b(\d{8})\b")
+
 
 def get_qdrant() -> QdrantClient:
-    """Create/reuse a Qdrant client."""
     global _client
     if _client is None:
         _client = QdrantClient(url=QDRANT_URL)
@@ -50,7 +37,6 @@ def get_qdrant() -> QdrantClient:
 
 
 def get_embedder() -> SentenceTransformer:
-    """Create/reuse the embedding model."""
     global _embedder
     if _embedder is None:
         _embedder = SentenceTransformer(EMBED_MODEL_NAME)
@@ -59,51 +45,69 @@ def get_embedder() -> SentenceTransformer:
 
 
 def _encode_query(text: str) -> List[float]:
-    """
-    Convert a user query to an embedding.
-    E5 family: prepend 'query: ' for best retrieval quality.
-    """
-    txt = f"query: {text}"
-    emb = get_embedder().encode([txt], normalize_embeddings=NORMALIZE_EMBEDDINGS)[0]
-    return emb.tolist()
+    # E5 requires 'query: ' prefix for queries
+    vec = get_embedder().encode([f"query: {text}"], normalize_embeddings=NORMALIZE_EMBEDDINGS)[0]
+    return vec.tolist()
 
 
 @dataclass
 class Hit:
-    text: str
+    pid: str
     source: str
+    page: Optional[int]
     score: float
+    text: str
 
 
-def search(query: str, top_k: int = DEFAULT_TOP_K) -> List[Hit]:
+def search(query: str, top_k: int = DEFAULT_TOP_K, min_score: float | None = 0.25) -> List[Hit]:
     """
-    Vector search in Qdrant via Query API. Returns top_k hits sorted by score.
+    Legacy-client compatible search:
+    - uses client.search(..., query_vector=..., query_filter=...)
+    - returns a list of Hit, filtered by optional min_score
     """
     vec = _encode_query(query)
     client = get_qdrant()
 
-    res = client.query_points(
+    # Build payload filter if a DTAD ID is present
+    qfilter = None
+    m = DTAD_RE.search(query)
+    if m:
+        # If your payload stored dtad_id as string, use value=m.group(1)
+        qfilter = models.Filter(must=[
+            models.FieldCondition(
+                key="dtad_id",
+                match=models.MatchValue(value=int(m.group(1)))
+            )
+        ])  # Payload filtering is the right way to target a specific tender.  # noqa
+
+    # NOTE: client.search returns a LIST of ScoredPoint on legacy clients
+    res = client.search(
         collection_name=QDRANT_COLLECTION,
-        query=vec,
+        query_vector=vec,
         limit=top_k,
         with_payload=True,
         with_vectors=False,
         search_params=models.SearchParams(hnsw_ef=128, exact=False),
+        query_filter=qfilter,
     )
 
     hits: List[Hit] = []
-    for p in res.points:
-        payload = p.payload or {}
-        text = payload.get("text", "")
-        source = payload.get("source", "")
-        hits.append(Hit(text=text, source=source, score=float(p.score)))
+    for p in res:  # <-- iterate the list (NOT res.points)
+        payload = (p.payload or {})
+        s = float(p.score)
+        if (min_score is not None) and (s < min_score):
+            continue
+        hits.append(Hit(
+            pid=str(p.id),
+            source=payload.get("source", ""),
+            page=payload.get("page"),
+            score=s,
+            text=payload.get("text", ""),
+        ))
     return hits
 
 
 def abs_source_path(source: str) -> Path:
-    """
-    Convert a Qdrant 'source' payload (usually relative path) into an absolute path.
-    """
     p = Path(source)
     if not p.is_absolute():
         p = (ROOT_DIR / p).resolve()
