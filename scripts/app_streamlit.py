@@ -1,19 +1,41 @@
 """
 RAG Bot (Local): Qdrant + Ollama
 - E5 embeddings + DTAD-aware filtering in search
-- Robust UI: unique keys for download buttons
+- Metadata-aware routing (DTAD-ID + Region/Year queries)
 """
+
 from __future__ import annotations
-import os
+import os, re, logging
 from typing import List, Dict, Any, Tuple
 import streamlit as st
-from langdetect import detect
 import ollama
+import pandas as pd
 
 from rag_qdrant import search, abs_source_path, QDRANT_COLLECTION
 from config import QDRANT_URL
 
-# ------------- Page / Theme -------------
+# --- Logging ---
+logger = logging.getLogger("app_streamlit")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+
+# --- Load metadata ---
+metadata_path = "metadata/cleaned_metadata.xlsx"
+try:
+    metadata_df = pd.read_excel(metadata_path)
+    logger.info(f"Loaded metadata from {metadata_path}, {len(metadata_df)} rows")
+except Exception as e:
+    logger.error(f"Could not load metadata: {e}")
+    metadata_df = pd.DataFrame()
+
+# Normalize column names for safety
+metadata_df.columns = [c.strip().replace(" ", "_").replace("-", "_") for c in metadata_df.columns]
+
+# Dynamic region dictionary
+region_list = sorted(set(str(r).lower() for r in metadata_df.get("Region", []) if pd.notna(r)))
+
+
+# --- Streamlit Page ---
 st.set_page_config(page_title="RAG Bot (Local)", page_icon="🧠", layout="wide")
 st.markdown("""
 <style>
@@ -29,7 +51,8 @@ hr { border-color: #243043; }
 </style>
 """, unsafe_allow_html=True)
 
-# ------------- Sidebar -------------
+
+# --- Sidebar ---
 st.sidebar.title("Settings")
 
 def list_local_models() -> List[str]:
@@ -37,13 +60,13 @@ def list_local_models() -> List[str]:
         resp = ollama.list()
         models = resp.models if hasattr(resp, "models") else resp.get("models", [])
         names = [m.model for m in models] if models and hasattr(models[0], "model") else [m["name"] for m in models]
-        preferred = ["qwen2.5:1.5b", "llama3.2:1b", "phi3:mini", "mistral:7b"]
+        preferred = ["qwen2.5:1.5b", "llama3.2:1b", "phi3:mini"]
         return [m for m in preferred if m in names] + [m for m in names if m not in preferred]
     except Exception:
         return ["qwen2.5:1.5b"]
 
 MODEL_NAME = st.sidebar.selectbox("Ollama model", list_local_models(), index=0)
-top_k = st.sidebar.slider("Top-K passages", 1, 20, 8)            # default 8
+top_k = st.sidebar.slider("Top-K passages", 1, 20, 8)
 temperature = st.sidebar.slider("Temperature", 0.0, 1.0, 0.2, 0.05)
 history_k = st.sidebar.slider("Use last K turns as memory", 2, 8, 3)
 show_debug = st.sidebar.checkbox("Show retrieved chunks", value=False)
@@ -64,24 +87,37 @@ with mid:
 st.sidebar.write("---")
 st.sidebar.caption(f"Qdrant: `{QDRANT_URL}`  \nCollection: `{QDRANT_COLLECTION}`")
 
-# ------------- Session State -------------
+
+# --- Session State ---
 if "messages" not in st.session_state:
     st.session_state.messages: List[Dict[str, str]] = []
 if "last_hits" not in st.session_state:
     st.session_state.last_hits = []
 
-# ------------- Prompts & helpers -------------
+
+# --- Prompts ---
 SYSTEM_PROMPT = (
-    "You are a helpful assistant. Answer the user's question using ONLY the provided context. "
-    "Cite sources with bracket numbers like [1], [2] that match the context list. "
-    "If the answer isn't in the context, say you don't know.\n"
-    "You can answer in English or German depending on the user's request."
-)
-FALLBACK_PROMPT = (
-    "You are a friendly assistant. The user might be asking something outside of the provided documents. "
-    "Provide a helpful answer, but do not invent facts about the private tender data."
+    "You are a tender assistant. Answer ONLY from the provided context below. "
+    "Do not use prior knowledge or external information. "
+    "If the answer cannot be found in the context, respond exactly with: 'Not in the tender data.' "
+    "Always cite sources with bracket numbers [1], [2] that match the context list. "
+    "Never make assumptions or invent facts. "
+    "Always answer in the SAME language as the user question. "
+    "If multiple IDs or dates appear, only report the ones explicitly matching the user’s query. "
+    "If no exact match is found, reply: 'Not in the tender data.' "
+    "If multiple dates/values appear for the same ID, cite them exactly as written, without interpretation."
 )
 
+FALLBACK_PROMPT = (
+    "You are a friendly assistant. The user might be asking something outside of the tender documents. "
+    "If the question is NOT related to tender data, you may answer generally. "
+    "But if the question IS related to tenders, and no supporting context is available, "
+    "always respond with: 'Not in the tender data.' "
+    "Never invent tender-specific facts or details."
+)
+
+
+# --- Helpers ---
 def build_context(hits) -> Tuple[str, List[Dict[str, Any]]]:
     ctx_lines, items = [], []
     for i, h in enumerate(hits, start=1):
@@ -89,20 +125,69 @@ def build_context(hits) -> Tuple[str, List[Dict[str, Any]]]:
         items.append({"i": i, "source": h.source, "score": round(float(h.score), 3)})
     return "\n\n".join(ctx_lines), items
 
+
 def augmentation_from_history(history: List[Dict[str, str]], k: int) -> str:
     if not history: return ""
     tail = history[-(2*k):]
-    lines = []
-    for m in tail:
-        prefix = "User:" if m["role"] == "user" else "Assistant:"
-        lines.append(f"{prefix} {m['content']}")
-    return "\n".join(lines)
+    return "\n".join([f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}" for m in tail])
+
 
 def llm_chat(model: str, messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
     resp = ollama.chat(model=model, messages=messages, options={"temperature": temperature})
     return resp["message"]["content"]
 
+
+def lookup_metadata(query: str) -> str | None:
+    """Answer structured queries from metadata (DTAD-ID, year, region)."""
+    q = query.lower()
+
+    # 1. Exact DTAD-ID lookup
+    m = re.search(r"\b(\d{7,8})\b", query)
+    if m and "dtad_id" in metadata_df.columns:
+        dtad_id = int(m.group(1))
+        row = metadata_df.loc[metadata_df["dtad_id"] == dtad_id]
+        if not row.empty:
+            r = row.iloc[0]
+            logger.info(f"Metadata hit for DTAD-ID {dtad_id}")
+            return (
+                f"DTAD-ID {dtad_id} | Titel: {r.get('Titel','')} | "
+                f"Datum: {r.get('Datum','')} | Region: {r.get('Region','')} | "
+                f"Vergabestelle: {r.get('Name_der_Vergabestelle') or r.get('Vergabestelle_komplett','')} | "
+                f"Quelle: {r.get('Source_URL','')}"
+            )
+        else:
+            logger.warning(f"DTAD-ID {dtad_id} not found in metadata")
+            return "Not in the tender data."
+
+    # 2. Year + Region queries
+    year_match = re.search(r"(20\d{2})", query)
+    df = metadata_df.copy()
+
+    if year_match and "Datum" in df.columns:
+        df = df[df["Datum"].astype(str).str.contains(year_match.group(1), na=False)]
+
+    for region in region_list:
+        if region in q:
+            df = df[df["Region"].str.lower().str.contains(region, na=False)]
+            break
+
+    if not df.empty and (year_match or any(r in q for r in region_list)):
+        logger.info(f"Metadata hit for region/year query: {query}")
+        return "\n".join([
+            f"DTAD-ID {r['dtad_id']} | Titel: {r['Titel']} | Datum: {r['Datum']} | Region: {r['Region']} | Quelle: {r.get('Source_URL','')}"
+            for _, r in df.head(5).iterrows()
+        ])
+
+    return None  # fallback to retrieval
+
+
 def answer_with_rag(query: str, model: str, top_k: int, temperature: float, history_text: str):
+    # Step 1: Metadata
+    meta_answer = lookup_metadata(query)
+    if meta_answer:
+        return meta_answer, [], True
+
+    # Step 2: Qdrant
     hits = search(query, top_k=top_k)
     st.session_state.last_hits = hits
     weak = (not hits) or (float(hits[0].score) < 0.58)
@@ -114,14 +199,12 @@ def answer_with_rag(query: str, model: str, top_k: int, temperature: float, hist
     messages.append({"role": "user", "content": f"Context:\n{context_str}\n\nQuestion:\n{query}"})
 
     if not weak:
+        logger.info("Qdrant hit")
         return llm_chat(model, messages, temperature), hits, True
-    return "", hits, False
 
-def translate_text(text: str, model: str, to_lang: str) -> str:
-    prompt = (f"Translate the following to **English**. Keep citations like [1] intact.\n\n{text}"
-              if to_lang.lower().startswith("en")
-              else f"Übersetze den folgenden Text ins **Deutsche**. Zitiere vorhandene Belege wie [1] unverändert.\n\n{text}")
-    return llm_chat(model, [{"role": "user", "content": prompt}], temperature=0.0)
+    logger.warning("Fallback path used")
+    return "Not in the tender data.", hits, False
+
 
 def render_sources(hits):
     if not hits: return
@@ -144,13 +227,14 @@ def render_sources(hits):
                         data=data,
                         file_name=os.path.basename(path),
                         mime="application/pdf",
-                        key=f"dl_{i}_{os.path.basename(path)}",  # unique key per widget
+                        key=f"dl_{i}_{os.path.basename(path)}",
                         use_container_width=True,
                     )
                 else:
                     st.button("Missing file", disabled=True, use_container_width=True)
 
-# ------------- Header + chat UI -------------
+
+# --- Header + Chat UI ---
 st.title("RAG Bot (Local): Qdrant + Ollama")
 with st.container(border=True):
     st.caption(
@@ -170,7 +254,12 @@ with col_b:
     if st.button("🌐 Translate last answer", disabled=disabled, use_container_width=True):
         last_ans = next((m["content"] for m in reversed(st.session_state.messages) if m["role"] == "assistant"), "")
         if last_ans:
-            translated = translate_text(last_ans, MODEL_NAME, "en" if target_lang == "English" else "de")
+            prompt = (
+                f"Translate the following to **English**. Keep citations like [1] intact.\n\n{last_ans}"
+                if target_lang == "English"
+                else f"Übersetze den folgenden Text ins **Deutsche**. Zitiere vorhandene Belege wie [1] unverändert.\n\n{last_ans}"
+            )
+            translated = llm_chat(MODEL_NAME, [{"role": "user", "content": prompt}], temperature=0.0)
             st.session_state.messages.append({"role": "assistant", "content": translated})
             st.rerun()
 
@@ -184,11 +273,9 @@ if go and user_q.strip():
         st.rerun()
 
     st.session_state.messages.append({"role": "user", "content": user_q})
-    # Light memory
     hist = st.session_state.messages[:-1]
     history_text = (" \n".join([f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}" for m in hist[-(2*history_k):]]))
 
-    # RAG
     grounded_text, hits, grounded = answer_with_rag(user_q, MODEL_NAME, top_k, temperature, history_text)
     if grounded:
         st.session_state.messages.append({"role": "assistant", "content": grounded_text})
@@ -196,7 +283,7 @@ if go and user_q.strip():
     else:
         warn = "⚠️ This answer is **not grounded** in your private documents."
         st.session_state.messages.append({"role": "assistant", "content": f"<div class='warn'>{warn}</div>"})
-        out = llm_chat(MODEL_NAME, [{"role": "user", "content": user_q}], temperature=temperature)
+        out = llm_chat(MODEL_NAME, [{"role": "system", "content": FALLBACK_PROMPT}, {"role": "user", "content": user_q}], temperature=temperature)
         st.session_state.messages.append({"role": "assistant", "content": out})
         st.rerun()
 
