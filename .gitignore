@@ -1,18 +1,15 @@
-# === Private data folders ===
+# === Private data & runtime artifacts (all under data/) ===
 data/
-extractdirect/
-_corrupt/
-.qodo/
+extractdirect/          # legacy extraction dir (old runs)
+_corrupt/               # quarantine for bad files
+.qodo/                  # local tool metadata
 
-# === Logs & analytics ===
+# === Logs (root or legacy) ===
 logs/
 *.log
-metadata/ingest_log_*.csv
-embed_chunks_*.log
-data_preparation.log
-parse_excel.log
 
-# === Derived metadata / DBs (contain sensitive or re-buildable data) ===
+# === Derived metadata / DBs (legacy names; new ones live under data/) ===
+metadata/ingest_log_*.csv
 metadata/cleaned_metadata.csv
 metadata/cleaned_metadata.xlsx
 metadata/manifest.db
@@ -20,25 +17,32 @@ metadata/manifest.db
 *.db
 processed_hashes.json
 
-# If you ever mount Qdrant storage to a local path, ignore it
+# If you ever mount Qdrant or other storage locally, ignore it
 qdrant_storage/
 
-# === Python artifacts ===
+# === Python build & cache ===
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
+dist/
+build/
 
 # === Environments ===
 .venv/
 venv/
 env/
 
-# === Secrets / models (don’t commit local model weights or keys) ===
+# === Secrets / local weights ===
 .env
+.env.*
 *.bin
 *.pt
+*.ckpt
+*.safetensors
 *.onnx
+*.gguf
 
 # === OS cruft ===
 .DS_Store
@@ -52,8 +56,12 @@ Thumbs.db
 *.tmp
 *.bak
 *.swp
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-
+# === Project-specific (keep out of git) ===
 /Test\ Data\ of\ Tender\ Files/
 /notes.txt
 how_what_why.ipynb

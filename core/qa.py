@@ -1,144 +1,158 @@
+# core/qa.py
 from __future__ import annotations
-
-import logging, os, re
 from dataclasses import dataclass
-from pathlib import Path
-from typing import List, Optional
-
-from qdrant_client import QdrantClient, models
+from typing import List, Dict, Optional
+import numpy as np
+from qdrant_client import QdrantClient
+from qdrant_client.http import models
 from sentence_transformers import SentenceTransformer
-
-# --- Config ---
-ROOT_DIR = Path(__file__).resolve().parents[1]
-QDRANT_URL = os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
-QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "tender_docs")
-EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "intfloat/multilingual-e5-small")
-NORMALIZE_EMBEDDINGS = True
-DEFAULT_TOP_K = int(os.getenv("RAG_TOP_K", "4"))       # stricter default
-DEFAULT_MIN_SCORE = float(os.getenv("RAG_MIN_SCORE", "0.45"))
-
-logger = logging.getLogger("rag_qdrant")
-if not logger.handlers:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-
-_client: Optional[QdrantClient] = None
-_embedder: Optional[SentenceTransformer] = None
-
-# Detect 8-digit DTAD IDs in query
-DTAD_RE = re.compile(r"\b(\d{8})\b")
-
-
-def get_qdrant() -> QdrantClient:
-    """Return a cached Qdrant client."""
-    global _client
-    if _client is None:
-        _client = QdrantClient(url=QDRANT_URL)
-        logger.info("Qdrant connected: %s", QDRANT_URL)
-    return _client
-
-
-def get_embedder() -> SentenceTransformer:
-    """Return a cached embedding model."""
-    global _embedder
-    if _embedder is None:
-        _embedder = SentenceTransformer(EMBED_MODEL_NAME)
-        logger.info("Embedding model loaded: %s", EMBED_MODEL_NAME)
-    return _embedder
-
-
-def _encode_query(text: str) -> List[float]:
-    """Encode query with E5 (requires 'query:' prefix)."""
-    vec = get_embedder().encode([f"query: {text}"], normalize_embeddings=NORMALIZE_EMBEDDINGS)[0]
-    return vec.tolist()
-
+from sklearn.feature_extraction.text import TfidfVectorizer
+import requests
+from .config import CFG
 
 @dataclass
 class Hit:
-    pid: str
-    source: str
-    page: Optional[int]
-    score: float
     text: str
+    score: float
+    payload: Dict
 
+class DenseRetriever:
+    def __init__(self, cfg=CFG):
+        self.cfg = cfg
+        self.client = QdrantClient(url=cfg.qdrant_url)
+        self.model = SentenceTransformer(cfg.embed_model, device="cuda" if self._cuda() else "cpu")
 
-def search(query: str, top_k: int = DEFAULT_TOP_K, min_score: float = DEFAULT_MIN_SCORE) -> List[Hit]:
-    """
-    Search Qdrant with stricter DTAD-ID handling.
-    If a DTAD-ID is in query → FORCE filter only that id.
-    Otherwise → semantic search.
-    """
-    client = get_qdrant()
+    def _cuda(self) -> bool:
+        try:
+            import torch; return torch.cuda.is_available()
+        except Exception:
+            return False
 
-    # --- Case 1: DTAD-ID strict filter ---
-    m = DTAD_RE.search(query)
-    if m:
-        dtad_id = int(m.group(1))
-        qfilter = models.Filter(must=[
-            models.FieldCondition(
-                key="dtad_id",
-                match=models.MatchValue(value=dtad_id)
-            )
-        ])
-        logger.info(f"Strict search enforced for DTAD-ID={dtad_id}")
+    def _encode_query(self, q: str) -> np.ndarray:
+        v = self.model.encode([f"query: {q}"], normalize_embeddings=True)
+        return np.asarray(v, dtype="float32")[0]
 
-        res = client.search(
-            collection_name=QDRANT_COLLECTION,
-            query_vector=_encode_query(query),
+    def search(self, query: str, top_k: int) -> List[Hit]:
+        v = self._encode_query(query)
+        res = self.client.search(
+            collection_name=self.cfg.qdrant_collection,
+            query_vector=v.tolist(),
             limit=top_k,
             with_payload=True,
-            with_vectors=False,
-            search_params=models.SearchParams(hnsw_ef=128, exact=False),
-            query_filter=qfilter,
+            search_params=models.SearchParams(hnsw_ef=self.cfg.hnsw_ef_search, exact=False),
         )
-    else:
-        # --- Case 2: normal semantic search ---
-        res = client.search(
-            collection_name=QDRANT_COLLECTION,
-            query_vector=_encode_query(query),
+        hits: List[Hit] = []
+        for r in res:
+            if r.score is None or r.score < self.cfg.min_score:
+                continue
+            pl = r.payload or {}
+            txt = pl.get("text", "")  # use chunk text if stored during indexing
+            hits.append(Hit(text=txt, score=float(r.score), payload=pl))
+        return hits
+
+    def __init__(self, cfg=CFG):
+        self.cfg = cfg
+        self.client = QdrantClient(url=cfg.qdrant_url)
+        self.model = SentenceTransformer(cfg.embed_model, device="cuda" if self._cuda() else "cpu")
+    def _cuda(self) -> bool:
+        try:
+            import torch; return torch.cuda.is_available()
+        except Exception: return False
+    def _encode_query(self, q: str) -> np.ndarray:
+        v = self.model.encode([f"query: {q}"], normalize_embeddings=True)
+        return np.asarray(v, dtype="float32")[0]
+    def search(self, query: str, top_k: int) -> List[Hit]:
+        v = self._encode_query(query)
+        res = self.client.search(
+            collection_name=self.cfg.qdrant_collection,
+            query_vector=v.tolist(),
             limit=top_k,
             with_payload=True,
-            with_vectors=False,
-            search_params=models.SearchParams(hnsw_ef=128, exact=False),
+            search_params=models.SearchParams(hnsw_ef=self.cfg.hnsw_ef_search, exact=False),
         )
+        return [Hit(text="", score=r.score, payload=r.payload) for r in res]
 
-    # --- Collect results ---
-    hits: List[Hit] = []
-    for i, p in enumerate(res, start=1):
-        payload = (p.payload or {})
-        s = float(getattr(p, "score", 1.0))
-        if s < min_score:
-            continue
-        hit = Hit(
-            pid=str(p.id),
-            source=payload.get("source", ""),
-            page=payload.get("page"),
-            score=s,
-            text=payload.get("text", ""),
+class SparseRetriever:
+    """Tiny local TF-IDF that ranks payload text (requires we stored text; if not, skip or load text on demand)."""
+    def __init__(self, corpus: List[str] | None = None):
+        self.vec = TfidfVectorizer(max_features=50000)
+        self.corpus = corpus or []
+        self.X = self.vec.fit_transform(self.corpus) if self.corpus else None
+    def search(self, query: str, top_k: int) -> List[Hit]:
+        if self.X is None: return []
+        qv = self.vec.transform([query])
+        scores = (self.X @ qv.T).toarray().ravel()
+        idx = np.argsort(-scores)[:top_k]
+        return [Hit(text=self.corpus[i], score=float(scores[i]), payload={}) for i in idx]
+
+class HybridRetriever:
+    def __init__(self, dense: DenseRetriever, sparse: Optional[SparseRetriever]=None):
+        self.dense, self.sparse = dense, sparse
+    def search(self, query: str, top_k: int) -> List[Hit]:
+        d = self.dense.search(query, top_k=top_k)
+        s = self.sparse.search(query, top_k=top_k) if self.sparse else []
+        # RRF fusion (simple)
+        def rrf(hits: List[Hit]) -> Dict[str, float]:
+            ranks, scores = {}, {}
+            for rank, h in enumerate(hits, start=1):
+                key = h.payload.get("source_path","") + f"#{h.payload.get('chunk_idx',-1)}"
+                scores[key] = scores.get(key, 0.0) + 1.0/(60.0 + rank)  # rrf_k=60
+                ranks[key] = rank
+            return scores
+        score_map = rrf(d)
+        if s: 
+            for rank, h in enumerate(s, start=1):
+                key = h.payload.get("source_path","") + f"#{h.payload.get('chunk_idx',-1)}"
+                score_map[key] = score_map.get(key, 0.0) + 1.0/(60.0 + rank)
+        # produce merged list using dense payloads as base
+        merged = []
+        for h in d:
+            key = h.payload.get("source_path","") + f"#{h.payload.get('chunk_idx',-1)}"
+            merged.append(Hit(text=h.text, score=score_map.get(key, h.score), payload=h.payload))
+        return sorted(merged, key=lambda x: x.score, reverse=True)[:top_k]
+
+class Answerer:
+    """LLM wrapper; expects top-k chunks in payload or loads text by path."""
+    def __init__(self, cfg=CFG):
+        self.cfg = cfg
+    def answer(self, query: str, hits: List[Hit]) -> str:
+        context_lines = []
+        for h in hits[: self.cfg.final_k]:
+            src = h.payload.get("source_path", "")
+            pg  = h.payload.get("page", None)
+            context_lines.append(f"[{src}{f':p{pg}' if pg is not None else ''}]")
+        prompt = (
+            "Answer the user using ONLY the context. If not present, say you don't know.\n\n"
+            f"Context:\n" + "\n".join(context_lines) + "\n\n"
+            f"Question: {query}\nAnswer:"
         )
-        hits.append(hit)
+        # Ollama call (pseudo; wire your existing code)
+        try:
+            import ollama
+            r = ollama.chat(model=self.cfg.llm_model, messages=[{"role":"user","content":prompt}], options={"num_predict":256})
+            return r["message"]["content"]
+        except Exception:
+            return "(LLM unavailable) " + prompt
 
-        logger.info(
-            f"Hit {i}: score={hit.score:.3f}, "
-            f"dtad_id={payload.get('dtad_id')}, "
-            f"source={hit.source}, page={hit.page}, "
-            f"text={hit.text[:120]}..."
-        )
+def retrieve_candidates(query: str, cfg=CFG) -> List[Hit]:
+    dense = DenseRetriever(cfg)
+    # if you build a sparse corpus later, instantiate SparseRetriever(corpus)
+    retr = HybridRetriever(dense=dense, sparse=None if not cfg.use_hybrid else None)
+    return retr.search(query, top_k=cfg.topk_candidate)
 
-    if m and not hits:
-        logger.warning(f"No results found for DTAD-ID {m.group(1)}")
-    return hits
+def answer_query(query: str, cfg=CFG) -> str:
+    hits = retrieve_candidates(query, cfg)
+    ans = Answerer(cfg).answer(query, hits)
+    return ans
 
-
-def abs_source_path(source: str) -> Path:
-    """Resolve relative source path to absolute path under project root."""
-    p = Path(source)
-    if not p.is_absolute():
-        p = (ROOT_DIR / p).resolve()
-    return p
-
-
-if __name__ == "__main__":
-    test_query = "Wann ist das Submission-Datum für DTAD-ID 2004749?"
-    results = search(test_query, top_k=4)
-    for r in results:
-        print(r)
+def _ask_llm(prompt: str) -> str:
+    body = {
+        "model": CFG.llm_model,
+        "prompt": prompt,
+        "options": {"num_predict": 256, "temperature": 0.2},
+        "stream": False,
+    }
+    r = requests.post("http://localhost:11434/api/generate", json=body, timeout=180)
+    r.raise_for_status()
+    data = r.json()
+    return (data.get("response") or "").strip() or "[LLM returned empty response]"

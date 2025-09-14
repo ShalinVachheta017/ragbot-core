@@ -1,265 +1,128 @@
-"""
-Batch Document Embedding Pipeline for Qdrant Vector Database
-
-This script processes tender documents (PDFs) and embeds them into Qdrant vector database.
-
-Key Features:
-- Extracts and processes ZIP archives containing PDF documents
-- Chunks PDFs into smaller text segments for better retrieval
-- Embeds text using E5 language model with 'passage:' prefix
-- Stores embeddings in Qdrant with rich metadata
-- Maintains processing history to avoid re-embedding
-- Supports batch processing for efficiency
-
-Payload Structure:
-    - text: Original chunk content
-    - source: Relative file path
-    - page: PDF page number
-    - chunk_index: Position in document
-    - doc_hash: SHA-256 hash of source PDF
-    - dtad_id: Tender ID (if available)
-
-Dependencies:
-    - PyMuPDF for PDF processing
-    - HuggingFace Transformers for embeddings
-    - Qdrant for vector storage
-    - LangChain for document processing
-"""
-
-# Standard library imports
+# core/index.py
 from __future__ import annotations
-import os, sys, zipfile, shutil, logging, hashlib, json, re
 from pathlib import Path
 from typing import List, Dict
-from uuid import uuid4
-from logging.handlers import RotatingFileHandler
+import logging, hashlib
+import numpy as np
+from qdrant_client import QdrantClient
+from qdrant_client.http import models
+from sentence_transformers import SentenceTransformer
 
-# Third-party imports
-from tqdm import tqdm
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.document_loaders import PyMuPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from qdrant_client import QdrantClient, models
+from .domain import DocumentPage, DocumentChunk
+from .io import PDFLoader, ExcelMetadataJoiner
+from .config import CFG
+from uuid import uuid5, NAMESPACE_URL
 
-# Local imports
-from config import (
-    EXTRACT_DIR, ROOT_DIR, EMBED_MODEL_NAME,
-    CHUNK_SIZE, CHUNK_OVERLAP, COLLECTION_NAME, QDRANT_URL
-)
+class PageAwareChunker:
+    def __init__(self, size: int, overlap: int):
+        self.size, self.overlap = size, overlap
 
-# === Logging Configuration ===
-LOG_DIR = ROOT_DIR / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-LOG_FILE = LOG_DIR / "embed_chunks_qdrant.log"
+    def split(self, pages: List[DocumentPage]) -> List[DocumentChunk]:
+        text_acc, page_acc, chunks = [], [], []
+        idx = 0
 
-fmt = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("embed_chunks_qdrant")
-fh = RotatingFileHandler(LOG_FILE, maxBytes=10_000_000, backupCount=3, encoding="utf-8")
-fh.setFormatter(logging.Formatter(fmt))
-fh.setLevel(logging.INFO)
-logger.addHandler(fh)
+        def flush():
+            nonlocal idx, text_acc, page_acc
+            if not text_acc: return
+            text = "".join(text_acc)
+            page_start, page_end = page_acc[0], page_acc[-1]
+            chunks.append(DocumentChunk(
+                chunk_index=idx,
+                text=text,
+                source_path=pages[0].source_path if pages else None,
+                page_start=page_start,
+                page_end=page_end,
+                meta={}
+            ))
+            idx += 1
+            keep = text[-self.overlap:] if self.overlap > 0 else ""
+            text_acc = [keep]
+            page_acc = [page_end] if self.overlap > 0 else []
 
-# Reduce noise from HTTP and Qdrant clients
-logging.getLogger("qdrant_client").setLevel(logging.WARNING)
-logging.getLogger("httpx").setLevel(logging.WARNING)
+        for p in pages:
+            t = p.text or ""
+            if not t: 
+                continue
+            cursor = 0
+            while cursor < len(t):
+                space_left = self.size - sum(len(x) for x in text_acc)
+                if space_left <= 0:
+                    flush(); space_left = self.size
+                take = t[cursor: cursor + space_left]
+                text_acc.append(take)
+                if p.page_number not in page_acc:
+                    page_acc.append(p.page_number)
+                cursor += len(take)
+        flush()
+        return chunks
 
-# === Configuration Settings ===
-RAW_DIR = ROOT_DIR / "data" / "raw"
-HASH_FILE = ROOT_DIR / "processed_hashes.json"
-BATCH_EMBED = int(os.getenv("BATCH_EMBED", "256"))    # Batch size for embeddings
-BATCH_UPSERT = int(os.getenv("BATCH_UPSERT", "256")) # Batch size for Qdrant uploads
-DTAD_RE = re.compile(r"DTAD[_-]?(\d{8})")           # Pattern to extract tender IDs
+class Indexer:
+    def __init__(self, cfg=CFG):
+        self.cfg = cfg
+        self.loader = PDFLoader()
+        self.chunker = PageAwareChunker(cfg.chunk_size, cfg.chunk_overlap)
+        self.embedder = SentenceTransformer(cfg.embed_model, device="cuda" if self._cuda() else "cpu")
+        self.client = QdrantClient(url=cfg.qdrant_url)
+        dim = self.embedder.get_sentence_embedding_dimension()
+        self._ensure_collection(dim)
+        self.joiner = ExcelMetadataJoiner()
 
-# === Helper Functions ===
-def get_file_hash(path: Path) -> str:
-    """
-    Calculate SHA-256 hash of a file using chunked reading for memory efficiency.
-    
-    Args:
-        path: Path to the file to hash
-        
-    Returns:
-        str: Hexadecimal representation of the SHA-256 hash
-    """
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):  # Read in 1MB chunks
-            h.update(chunk)
-    return h.hexdigest()
-
-def load_or_init_hashes() -> set[str]:
-    """
-    Load previously processed file hashes or initialize new set.
-    
-    Returns:
-        set[str]: Set of file hashes that have already been processed
-    """
-    if HASH_FILE.exists():
+    def _cuda(self) -> bool:
         try:
-            return set(json.loads(HASH_FILE.read_text(encoding="utf-8")))
+            import torch; return torch.cuda.is_available()
         except Exception:
-            logger.warning("Could not read processed_hashes.json — starting fresh")
-    return set()
+            return False
 
-def save_hashes(hashes: set[str]) -> None:
-    """
-    Save processed file hashes to disk.
-    
-    Args:
-        hashes: Set of file hashes to save
-    """
-    HASH_FILE.write_text(json.dumps(sorted(hashes), indent=2), encoding="utf-8")
-
-def pick_device() -> str:
-    """
-    Select appropriate compute device (CUDA GPU if available, else CPU).
-    
-    Returns:
-        str: 'cuda' or 'cpu'
-    """
-    try:
-        import torch
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    except Exception:
-        return "cpu"
-
-# === Main Processing Pipeline ===
-def main() -> None:
-    """
-    Main execution pipeline for document processing and embedding.
-    
-    Steps:
-    1. Connect to Qdrant
-    2. Extract ZIP archives
-    3. Process PDFs and create chunks
-    4. Generate embeddings
-    5. Upload to Qdrant
-    6. Update processing history
-    """
-    logger.info("=== Embedding pipeline (Qdrant) starting ===")
-
-    # Initialize Qdrant connection
-    client = QdrantClient(url=QDRANT_URL, prefer_grpc=False)
-    client.get_collections()  # Test connection
-    logger.info(f"Connected to Qdrant at {QDRANT_URL}")
-
-    # Process ZIP files
-    zip_files = sorted(RAW_DIR.rglob("*.zip"))
-    logger.info(f"Found {len(zip_files)} zip files recursively under {RAW_DIR}")
-    shutil.rmtree(EXTRACT_DIR, ignore_errors=True)
-    EXTRACT_DIR.mkdir(parents=True, exist_ok=True)
-    
-    # Extract all ZIPs
-    for zip_path in tqdm(zip_files, desc="Unzipping ZIPs", unit="zip"):
+    def _ensure_collection(self, dim: int):
         try:
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                zf.extractall(EXTRACT_DIR / zip_path.stem)
-        except zipfile.BadZipFile:
-            logger.warning(f"Bad zip skipped: {zip_path}")
+            self.client.get_collection(self.cfg.qdrant_collection)
+        except Exception:
+            self.client.recreate_collection(
+                collection_name=self.cfg.qdrant_collection,
+                vectors_config=models.VectorParams(size=dim, distance=models.Distance.COSINE),
+            )
 
-    # Discover PDFs
-    pdf_paths = sorted(EXTRACT_DIR.rglob("*.pdf"))
-    logger.info(f"Found {len(pdf_paths)} PDFs to process")
+    def _embed(self, texts: list[str]) -> np.ndarray:
+        out = self.embedder.encode([f"passage: {t}" for t in texts], normalize_embeddings=True, batch_size=32)
+        return np.asarray(out, dtype="float32")
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP,
-        separators=["\n\n","\n"," ",""]
-    )
+    def _point_id(self, doc_hash: str, chunk_idx: int) -> str:
+    # Deterministic UUID based on doc hash + chunk index
+        return str(uuid5(NAMESPACE_URL, f"{doc_hash}|{chunk_idx}"))
 
-    seen_hashes = load_or_init_hashes()
-    new_hashes: set[str] = set()
-    texts: List[str] = []
-    metas: List[Dict] = []
+    def build(self, extract_dir: Path | None = None, metadata_path: Path | None = None):
+        base = Path(extract_dir or self.cfg.extract_dir)
+        pdfs = sorted(base.rglob("*.pdf"))
+        logging.info(f"Found {len(pdfs)} PDFs")
+        for pdf in pdfs:
+            pages = self.loader.load_pages(pdf)
+            chunks: List[DocumentChunk] = self.chunker.split(pages)
+            if not chunks:
+                logging.info(f"Skipped (no text): {pdf}")
+                continue
 
-    for pdf_path in tqdm(pdf_paths, desc="Chunking PDFs", unit="pdf"):
-        pdf_hash = get_file_hash(pdf_path)
-        if pdf_hash in seen_hashes:
-            logger.info(f"⏭️  Skip already-embedded PDF: {pdf_path.name}")
-            continue
+            # Deterministic per-file hash
+            try:
+                h = hashlib.sha1(pdf.read_bytes()).hexdigest()
+            except Exception:
+                # fallback: use path if read_bytes not allowed
+                h = hashlib.sha1(str(pdf).encode("utf-8")).hexdigest()
 
-        # derive dtad_id from path (e.g., extractdirect/DTAD_20047454/..)
-        rel = str(pdf_path.relative_to(ROOT_DIR))
-        m = DTAD_RE.search(rel)
-        dtad_id = int(m.group(1)) if m else None
+            payloads, texts = [], []
+            for c in chunks:
+                meta = self.joiner.enrich(c.source_path, {**c.meta})
+                pl = {**c.payload(), **meta, "doc_hash": h}
+                payloads.append(pl)
+                texts.append(c.text)
 
-        try:
-            pages = PyMuPDFLoader(str(pdf_path)).load()
-        except Exception as e:
-            logger.warning(f"Failed to read PDF {pdf_path.name}: {e}")
-            continue
-
-        chunks = splitter.split_documents(pages)
-        for i, ch in enumerate(chunks):
-            meta = ch.metadata.copy()
-            meta.update({
-                "source": rel,                 # keep relative path
-                "chunk_index": i,
-                "doc_hash": pdf_hash,
-                "text": ch.page_content,       # retrieve-only payload
-                "page": meta.get("page"),
-            })
-            if dtad_id is not None:
-                meta["dtad_id"] = dtad_id
-
-            texts.append(ch.page_content)
-            metas.append(meta)
-
-        new_hashes.add(pdf_hash)
-
-    logger.info(f"Prepared {len(texts)} chunks for embedding")
-    if not texts:
-        logger.info("Nothing to embed. Exiting.")
-        return
-
-    # Embeddings (E5 requires 'passage:' prefix for documents)  ── refs: sbert docs
-    device = pick_device()
-    logger.info(f"Loading embedding model on device: {device}")
-    embedder = HuggingFaceEmbeddings(model_name=EMBED_MODEL_NAME, model_kwargs={"device": device})
-    dim = len(embedder.embed_query("dimension_probe"))
-    logger.info(f"Model loaded: {EMBED_MODEL_NAME} (dim={dim})")
-
-    # Ensure collection (create if missing; keep if exists)
-    try:
-        client.get_collection(COLLECTION_NAME)
-        logger.info(f"Collection exists: {COLLECTION_NAME}")
-    except Exception:
-        logger.info(f"Creating collection: {COLLECTION_NAME}")
-        client.create_collection(
-            collection_name=COLLECTION_NAME,
-            vectors_config=models.VectorParams(size=dim, distance=models.Distance.COSINE),
-            optimizers_config=models.OptimizersConfigDiff(default_segment_number=2),
-            hnsw_config=models.HnswConfigDiff(m=16, ef_construct=200),
-        )
-
-    # Embed & upsert
-    total = len(texts)
-    upserted = 0
-    for i in tqdm(range(0, total, BATCH_EMBED), desc="Embedding", unit="chunk"):
-        batch_texts = texts[i:i+BATCH_EMBED]
-        batch_metas = metas[i:i+BATCH_EMBED]
-
-        # E5 doc/passage prefix
-        vectors = embedder.embed_documents([f"passage: {t}" for t in batch_texts])
-
-        for j in range(0, len(vectors), BATCH_UPSERT):
-            vecs = vectors[j:j+BATCH_UPSERT]
-            payl = batch_metas[j:j+BATCH_UPSERT]
-            points = [models.PointStruct(id=uuid4().hex, vector=v, payload=p) for v, p in zip(vecs, payl)]
-            client.upsert(collection_name=COLLECTION_NAME, points=points, wait=True)
-            upserted += len(points)
-
-    logger.info(f"✅ Embedded {upserted} chunks into Qdrant collection: {COLLECTION_NAME}")
-
-    # Save hash cache
-    seen_hashes.update(new_hashes)
-    save_hashes(seen_hashes)
-    logger.info("💾 Updated processed_hashes.json")
-    logger.info("=== Embedding pipeline finished ===")
-
-if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        logger.warning("Interrupted by user")
-        sys.exit(1)
+            vecs = self._embed(texts)
+            points = [
+                models.PointStruct(
+                    id=self._point_id(pl["doc_hash"], pl["chunk_idx"]),  # <- NOT None
+                    vector=v.tolist(),
+                    payload=pl,
+                )
+                for v, pl in zip(vecs, payloads)
+            ]
+            self.client.upsert(collection_name=self.cfg.qdrant_collection, points=points)
+            logging.info(f"Upserted {len(points)} chunks from {pdf}")

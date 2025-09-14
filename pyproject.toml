@@ -1,0 +1,12 @@
+[project]
+name = "multilingual-ragbot"
+version = "0.1.0"
+description = "Multilingual RAG bot for tender documents"
+requires-python = ">=3.9"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["core"]   # only the package you import as 'core'

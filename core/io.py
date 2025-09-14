@@ -1,218 +1,217 @@
-"""
-Hybrid ZIP File Ingestion System
+# core/io.py
+from __future__ import annotations
+from pathlib import Path
 
-Features:
-- Multi-process parallel processing of ZIP files
-- SHA-256 checksums for deduplication
-- Handles nested ZIP archives
-- File analysis and validation
-- Detailed logging and manifest tracking
-
-File Structure:
-- Source ZIPs: data/raw/
-- Extracted files: extractdirect/<zip-stem>/
-- Database: metadata/manifest.db (SQLite)
-- Logs: metadata/ingest_log_YYYY-MM.csv (monthly rotation)
-"""
-
-import os, zipfile, hashlib, pathlib, csv, logging
-from multiprocessing import Pool, Queue, cpu_count, Process
+from dataclasses import dataclass
+import hashlib, json, csv, logging, zipfile
 from datetime import datetime
-import magic, langdetect
-from tqdm import tqdm
-from .manifest import seen, record        # Database operations for tracking processed files
+from typing import Iterable, List, Optional, Tuple , Dict
 
-# === Configuration Settings ===
-SRC_ROOT     = pathlib.Path("data/raw")       # Source directory for ZIP files
-EXTRACT_DIR  = pathlib.Path("extractdirect")  # Target directory for extracted files
-CORRUPT_DIR  = pathlib.Path("_corrupt")       # Directory for corrupted ZIP files
-ALLOWED_EXT  = {".pdf",".docx",".d83",".dwg",".jpg",".png",".tiff",".zip"}  # Permitted file types
-MAX_MB       = 100                            # Maximum allowed file size in MB
-WORKERS      = max(1, cpu_count() - 2)        # Number of parallel workers (leaves 2 cores free)
+from .domain import DocumentPage
 
-# Create necessary directories
-for d in (EXTRACT_DIR, CORRUPT_DIR, pathlib.Path("logs"), pathlib.Path("metadata")):
-    d.mkdir(parents=True, exist_ok=True)
+import langdetect
+import fitz  # PyMuPDF
+import docx  # python-docx
+import pandas as pd 
 
-# Configure logging
+from .config import CFG
+
 logging.basicConfig(
-    filename="logs/data_preparation.log",
+    filename=str(CFG.logs_dir / "data_preparation.log"),
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(message)s",
 )
 
-# Global queue for inter-process communication
-_writer_q = None
-def _init_pool(q):
-    """Initialize worker process with queue reference"""
-    global _writer_q
-    _writer_q = q
+@dataclass(frozen=True)
+class FileInfo:
+    path: Path
+    size_mb: float
+    status: str
+    lang: str = ""
 
-def sha256sum(path: pathlib.Path) -> str:
-    """Calculate SHA-256 hash of a file using chunked reading for memory efficiency"""
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):  # Read 1MB chunks
-            h.update(chunk)
-    return h.hexdigest()
+class ManifestRepo:
+    """Minimal JSON set of processed ZIP hashes (or files) under data/state."""
+    def __init__(self, path: Path | None = None):
+        self.path = path or (CFG.state_dir / "zip_manifest.json")
+        self._seen = set(json.loads(self.path.read_text("utf-8"))) if self.path.exists() else set()
 
-def analyse_file(p: pathlib.Path):
-    """
-    Analyze a file for validity and content type
-    
-    Checks:
-    - File extension against allowed list
-    - File size against maximum limit
-    - MIME type validation
-    - Language detection for text-based files
-    
-    Returns:
-        tuple: (status, language)
-    """
-    status, lang = "valid", ""
-    ext = p.suffix.lower()
-    
-    # Validation checks
-    if ext not in ALLOWED_EXT:
-        status = "invalid_format"
-    elif p.stat().st_size > MAX_MB * 1024**2:
-        status = "oversized"
-    else:
+    def seen(self, key: str) -> bool:
+        return key in self._seen
+
+    def add(self, key: str) -> None:
+        self._seen.add(key)
+        self.path.write_text(json.dumps(sorted(self._seen)), encoding="utf-8")
+
+class ZipIngestor:
+    ALLOWED_EXT = {".pdf",".docx",".d83",".dwg",".jpg",".png",".tiff",".zip"}
+    MAX_MB = 100
+
+    def __init__(self, manifest: ManifestRepo | None = None):
+        CFG.extract_dir.mkdir(parents=True, exist_ok=True)
+        CFG.logs_dir.mkdir(parents=True, exist_ok=True)
+        CFG.state_dir.mkdir(parents=True, exist_ok=True)
+        self.manifest = manifest or ManifestRepo()
+
+    def _sha256(self, p: Path) -> str:
+        h = hashlib.sha256()
+        with p.open("rb") as f:
+            for chunk in iter(lambda: f.read(1<<20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    def _sample_text(self, p: Path) -> str:
         try:
-            mime = magic.from_file(p, mime=True)
-            if not mime.startswith(("application", "image")):
-                status = "corrupted"
+            if p.suffix.lower() == ".pdf":
+                with fitz.open(p) as doc:
+                    return (doc[0].get_text() if len(doc) else "")[:3000]
+            if p.suffix.lower() == ".docx":
+                d = docx.Document(p)
+                return " ".join(par.text for par in d.paragraphs)[:3000]
         except Exception:
-            status = "corrupted"
-    
-    # Language detection for text-based files
-    if status == "valid" and ext in {".pdf", ".docx", ".txt"}:
-        try:
-            snippet = p.read_text(errors="ignore")[:3000]
-            lang = langdetect.detect(snippet) if snippet else ""
-        except Exception:
-            pass
-    return status, lang
+            return ""
+        return ""
 
-def recurse_extract(zip_path: pathlib.Path, root_zip:str):
-    """
-    Recursively extract and process ZIP contents
-    
-    - Extracts all files from ZIP
-    - Analyzes each extracted file
-    - Handles nested ZIP files recursively
-    - Logs extraction details to queue
-    """
-    with zipfile.ZipFile(zip_path) as zf:
-        for info in zf.infolist():
-            if info.is_dir(): continue
-            
-            # Setup extraction path
-            out_path = EXTRACT_DIR / root_zip.stem / info.filename
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Extract and analyze file
-            zf.extract(info, EXTRACT_DIR / root_zip.stem)
-            status, lang = analyse_file(out_path)
-            
-            # Log extraction details
-            _writer_q.put((
-                root_zip.name, zip_path.name, str(out_path),
-                info.file_size, status, lang
-            ))
-            
-            # Handle nested ZIP files
-            if status == "valid" and out_path.suffix.lower() == ".zip":
-                try:
-                    recurse_extract(out_path, root_zip)
-                except zipfile.BadZipFile:
-                    logging.error("Nested corrupt: %s", out_path)
+    def _analyse_file(self, p: Path) -> FileInfo:
+        size_mb = p.stat().st_size / (1024**2)
+        if p.suffix.lower() not in self.ALLOWED_EXT:
+            return FileInfo(p, size_mb, "invalid_format")
+        if size_mb > self.MAX_MB:
+            return FileInfo(p, size_mb, "oversized")
+        lang = ""
+        if p.suffix.lower() in {".pdf",".docx",".txt"}:
+            text = self._sample_text(p) if p.suffix.lower() in {".pdf",".docx"} else p.read_text(errors="ignore")[:3000]
+            if text:
+                try: lang = langdetect.detect(text)
+                except Exception: lang = ""
+        return FileInfo(p, size_mb, "valid", lang)
 
-def worker(zip_path: str):
-    """
-    Process a single ZIP file
-    
-    - Calculates checksum
-    - Checks for previous processing
-    - Extracts contents
-    - Handles corrupt files
-    - Updates manifest
-    """
-    p = pathlib.Path(zip_path)
-    h = sha256sum(p)
-    if seen(h):  # Skip if already processed
-        return
-        
-    try:
-        # Count files and extract
-        with zipfile.ZipFile(p) as z: total = len(z.infolist())
-        recurse_extract(p, p)
-        
-        # Record successful processing
-        record(h, {
-            "filename": p.name,
-            "extracted_to": str(EXTRACT_DIR / p.stem),
-            "status": "success",
-            "files_ok": total,
-            "files_fail": 0,
-            "total_files": total
-        })
-    except zipfile.BadZipFile:
-        # Handle corrupt ZIP files
-        CORRUPT_DIR.mkdir(exist_ok=True)
-        p.rename(CORRUPT_DIR / p.name)
-        record(h, {
-            "filename": p.name, "extracted_to": "",
-            "status": "corrupt", "files_ok": 0,
-            "files_fail": 0, "total_files": 0
-        })
-
-def csv_writer(q: Queue):
-    """
-    Write extraction results to CSV
-    
-    - Creates monthly log files
-    - Records file details and status
-    - Handles queue shutdown
-    """
-    month_tag = datetime.utcnow().strftime("%Y-%m")
-    csv_path = pathlib.Path(f"metadata/ingest_log_{month_tag}.csv")
-    with csv_path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["root_zip","nested_zip","file","size","status","lang"])
-        while True:
-            row = q.get()
-            if row is None:  # Shutdown signal
-                break
+    def _log_row(self, row: list[str]) -> None:
+        csv_path = CFG.logs_dir / f"ingest_{datetime.utcnow():%Y-%m}.csv"
+        new = not csv_path.exists()
+        with csv_path.open("a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if new: w.writerow(["root_zip","nested_zip","file","size_mb","status","lang"])
             w.writerow(row)
 
-def main():
-    """
-    Main execution function
-    
-    - Finds all ZIP files
-    - Sets up parallel processing
-    - Manages worker processes
-    - Handles progress reporting
-    """
-    zip_list = [str(p) for p in SRC_ROOT.rglob("*.zip")]
-    logging.info("Found %d outer zips under data/raw", len(zip_list))
-    
-    # Setup processing queue and writer process
-    q = Queue()
-    writer = Process(target=csv_writer, args=(q,))
-    writer.start()
+    def _extract_zip(self, zip_path: Path, root_zip: Path) -> int:
+        count = 0
+        try:
+            with zipfile.ZipFile(zip_path) as z:
+                for member in z.infolist():
+                    out = CFG.extract_dir / member.filename
+                    if member.is_dir():
+                        out.mkdir(parents=True, exist_ok=True)
+                        continue
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    with z.open(member) as src, out.open("wb") as dst:
+                        dst.write(src.read())
+                    # recurse if nested zip
+                    if out.suffix.lower() == ".zip":
+                        count += self._extract_zip(out, root_zip)
+                    else:
+                        info = self._analyse_file(out)
+                        self._log_row([str(root_zip.name), str(zip_path.name), str(out), f"{info.size_mb:.2f}", info.status, info.lang])
+                        count += 1
+        except Exception as e:
+            logging.exception(f"Corrupt zip: {zip_path} :: {e}")
+        return count
 
-    # Process ZIPs in parallel with progress bar
-    with Pool(processes=WORKERS, initializer=_init_pool, initargs=(q,)) as pool:
-        for _ in tqdm(pool.imap_unordered(worker, zip_list, chunksize=1),
-                    total=len(zip_list), desc="Ingesting ZIPs"):
-            pass
-            
-    # Cleanup
-    q.put(None)
-    writer.join()
-    logging.info("Ingestion done")
+    def run(self) -> int:
+        """Extract all zips from raw_dir into extract_dir. Returns number of files analyzed."""
+        total = 0
+        for zip_path in CFG.raw_dir.rglob("*.zip"):
+            h = self._sha256(zip_path)
+            if self.manifest.seen(h):
+                logging.info(f"Skip already processed: {zip_path}")
+                continue
+            logging.info(f"Extracting {zip_path}")
+            total += self._extract_zip(zip_path, root_zip=zip_path)
+            self.manifest.add(h)
+        return total
 
-if __name__ == "__main__":
-    main()
+class ExcelCleaner:
+    """Find latest Excel in raw_dir, clean, and write cleaned_metadata to metadata_dir."""
+    def run(self) -> Path:
+        exc = sorted(CFG.raw_dir.glob("*.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not exc: raise FileNotFoundError("No .xlsx in data/raw")
+        src = exc[0]
+        import pandas as pd
+        df = pd.read_excel(src)
+        df = df.dropna(how="all")
+        df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+        if "dtad_id" in df.columns:
+            df["dtad_id"] = df["dtad_id"].astype(str).str.strip()
+        CFG.metadata_dir.mkdir(parents=True, exist_ok=True)
+        out_csv = CFG.metadata_dir / "cleaned_metadata.csv"
+        out_xlsx = CFG.metadata_dir / "cleaned_metadata.xlsx"
+        df.to_csv(out_csv, index=False, encoding="utf-8-sig")
+        df.to_excel(out_xlsx, index=False)
+        logging.info(f"Cleaned metadata written: {out_csv}")
+        return out_xlsx
+
+class PDFLoader:
+    """Return one DocumentPage per PDF page with basic metadata."""
+    def load_pages(self, pdf_path: Path) -> List[DocumentPage]:
+        import fitz  # PyMuPDF
+        pages: List[DocumentPage] = []
+        with fitz.open(pdf_path) as doc:
+            for i, page in enumerate(doc, start=1):
+                text = page.get_text() or ""
+                pages.append(DocumentPage(
+                    page_number=i,
+                    text=text,
+                    source_path=pdf_path,
+                    meta={"loader": "pymupdf"}
+                ))
+        return pages
+
+class ExcelMetadataJoiner:
+    """Join cleaned Excel metadata onto payloads by dtad_id or filename stem."""
+    def __init__(self, cleaned_path: Path | None = None):
+        self.cleaned_path = Path(cleaned_path) if cleaned_path else (CFG.metadata_dir / "cleaned_metadata.xlsx")
+        self._map: dict[str, dict] = {}
+        self._loaded = False
+
+    def _load_once(self):
+        if self._loaded:
+            return
+        self._loaded = True
+        try:
+            if not self.cleaned_path.exists():
+                logging.warning(f"ExcelMetadataJoiner: missing {self.cleaned_path}, continuing without metadata.")
+                return
+            df = pd.read_excel(self.cleaned_path)
+            if df.empty:
+                logging.warning(f"ExcelMetadataJoiner: {self.cleaned_path} is empty, continuing without metadata.")
+                return
+            df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+            if "dtad_id" in df.columns:
+                df["dtad_id"] = df["dtad_id"].astype(str).str.strip()
+                self._map = {
+                    str(row["dtad_id"]).strip(): row.to_dict()
+                    for _, row in df.iterrows()
+                    if pd.notna(row.get("dtad_id", None))
+                }
+            else:
+                logging.warning("ExcelMetadataJoiner: no 'dtad_id' column found.")
+        except Exception as e:
+            logging.exception(f"ExcelMetadataJoiner: failed to read {self.cleaned_path}: {e}")
+
+    def enrich(self, path: Path, meta: dict) -> dict:
+        """Attach row data if we can match by dtad_id or filename digits."""
+        self._load_once()
+        if not self._map:
+            return meta
+
+        # prefer explicit dtad_id in meta
+        key = str(meta.get("dtad_id", "")).strip()
+        if not key:
+            # fallback: guess from filename digits (take first 8 if present)
+            stem_digits = "".join(ch for ch in path.stem if ch.isdigit())
+            key = stem_digits[:8] if len(stem_digits) >= 8 else stem_digits
+
+        if key and key in self._map:
+            merged = {**meta, **self._map[key]}
+            merged["dtad_id"] = key  # ensure string
+            return merged
+        return meta
