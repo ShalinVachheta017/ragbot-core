@@ -1,99 +1,133 @@
 #%%
-import torch
-print("CUDA:", torch.cuda.is_available())
+##!/usr/bin/env python3
+"""
+Nuclear cleanup - removes ALL unwanted files an```ollections for fresh start
+"""
 
-# %%
-import fitz, qdrant_client, transformers, sentence_transformers, streamlit
-print("✅ core deps OK")
-# %%
-where python
-python -c "import sys; print(sys.executable)"
-pip --version
-
-# %%
-
-import core, core.config
-print("core imported from:", core.__file__)
-print("EMBED_MODEL:", core.config.EMBED_MODEL_NAME)
-
-# %%
-
-import torch; print("CUDA available:", torch.cuda.is_available(), "| device:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU")
-
-# %%
-from qdrant_client import QdrantClient
-c = QdrantClient(url="http://localhost:6333")
-print(c.count("tender_docs_m-e5-large_v1", exact=True))
-
-
-# %%
-import sentence_transformers, qdrant_client, ollama
-print('✅ Core deps OK')
-# %%
-from FlagEmbedding import FlagReranker
-from sentence_transformers import SentenceTransformer  
-print('✅ All dependencies ready for Jina v3 + Reranker!')
-
-# %%# %%
-try:
-    from FlagEmbedding import FlagReranker
-    from sentence_transformers import SentenceTransformer
+import sh```l
+from pathlib import Path
+import os```ef cleanup_scripts_and_ui():
+    """Clean unw```ed files from scripts and UI directories"""
     
-    # Test model loading
-    reranker = FlagReranker('BAAI/bge-reranker-v2-m3', use_fp16=True)
-    print('✅ FlagEmbedding and SentenceTransformer imports successful!')
-    print('✅ Reranker model loaded successfully!')
-except ImportError as e:
-    print('❌ Import Error:', e)
-    print('💡 Try: pip install FlagEmbedding')
-except Exception as e:
-    print('❌ Error:', e)
+    project```ot = Path(__file__).parent.parent
+    
+    #```wanted script files to remove
+    unwanted_scripts =``` [
+        "debug_tender_bot.py",
+        "pytorch_fix_chat.py", 
+        "working_chat.py",
+        "clean_tender_bot.py",
+        "simple_fresh_pipeline.py",
+        "test.py",
+        "working_pipeline.py",
+        "check_existing.py"
+    ]
+    
+    #```wanted UI files (patterns)
+    unwanted_ui_```terns = [
+        "debug_*.py",
+        "pytorch_*.py", 
+        "working_*.py",
+        "clean_*.py",
+        "simple_*.py",
+        "minimal_*.py",
+        "test_*.py"
+    ]
+    
+    print``` Cleaning scripts directory```")
+    scripts_dir = project_root / "```ipts"
+    removed_```nt = 0
+    
+    for```ript_name in unwanted_scripts:```      script_path = scripts_dir / script_name
+        if script```th.exists():
+            script```th.unlink()
+            ```nt(f"  ❌ Removed: {```ipt_name}")
+            removed_count += 1
+    
+    ```nt(f"\n🧹 Cleaning UI directory...")
+    ui_dir```project_root / "ui"```  
+    for pattern in unwanted_ui_patterns:```      for file_path in ui_dir.glob(```tern):
+            if file_path```ists():
+                file_path```link()
+                print(f"  ❌```moved: {file_path.name}")
+                ```oved_count += 1
+    ```  # Remove cache```rectories
+    for cache_dir in [scripts_dir / "__pycache__", ui_dir / "__pycache__"]:
+        if cache_dir.exists```
+            shutil.rmtree(cache_dir)
+            ```nt(f"  ❌ Removed: {cache_dir```lative_to(project_root)}")```          removed_count += 1
+    ```  print(f"✅ Removed {removed_count```nwanted files/directories")```ef delete_qdrant_collection():
+    """Delete```isting Qdrant collection"""```  
+    try:
+        from```rant_client import Q```ntClient
+        from core.config import CF```       
+        print("\n🗑️ Connecting to Qdrant...")
+        ```ent = QdrantClient(url=CFG.```ant_url)
+        ```      collections = client.get_collections().```lections
+        collection_names = [c.name for c in collections]
+        
+        if CF```drant_collection in collection_names:
+            print(```️ Deleting collection```CFG.qdrant_collection}")
+            client.delete```llection(CFG.qdrant_collection)
+            print("```drant collection deleted successfully")
+            ```urn True
+        else:
+            print(f"```No collection named '{CFG.qdrant_collection```found")
+            return False
+            
+    except Import```or:
+        print("⚠️ ```ant_client not available - install with: pip install qdrant-```ent")
+        return False
+    except Exception as e:
+        print```❌ Could not delete Qdrant collection:```}")
+        return False
 
-# %%
-!pip install FlagEmbedding
-# %%
+def cleanup```ta_directories():
+    """Clean data```rectories for fresh start"""
+    
+    project```ot = Path(__file__).parent.parent
+    
+    #```rectories to clean (but preserve structure)
+    cleanup```rs = [
+        "data/logs", 
+        "data/runs",
+        "data/state",
+        "logs"
+    ]
+    
+    print```n🗑️ Cleaning data directories...")
+    
+    for dir_name``` cleanup_dirs:
+        dir```th = project_root / dir```me
+        if dir_path```ists():
+            shutil.rmtree(dir_```h)
+            print(f"  ❌ Removed:```ir_name}")
+    
+    #```create essential directories
+    essential_dirs = [
+        "data/extract",
+        "data/logs",
+        "logs"
+    ]
+    
+    for```r_name in essential_dirs:```      (project_root / dir_name).```ir(parents=True, exist_```True)
+        print(``` 📁 Created: {dir_name```
 
-from sentence_transformers import SentenceTransformer
-m = SentenceTransformer("jinaai/jina-embeddings-v3", trust_remote_code=True)
-print("raw dim:", m.get_sentence_embedding_dimension())        # → 1024
-print("cropped dim should be 512 in your code")
-# %%
-import sentence_transformers, transformers, huggingface_hub
-print("ST:", sentence_transformers.__version__)
-print("TF:", transformers.__version__)
-print("HF:", huggingface_hub.__version__)
-# %%
+def main():
+    print``` Starting Nuclear Cleanup")```  print("=" * 50```   
+    # Step 1: Clean files```  cleanup_scripts_and_ui()```  
+    # Step 2:```lete Qdrant collection
+    ```ant_deleted = delete_qdrant_collection```    
+    # Step 3: Clean data directories  ```  cleanup_data_directories()```  
+    # Summary```  print("\n" + "=" * 50)
+    print("🎉 NUCLEAR```EANUP COMPLETE!")
+    print("=" * ```
+    print("✅ Unw```ed script/UI files removed")
+    print("```ata directories cleaned")
+    print(```'✅' if qdrant_deleted else '```} Qdrant collection {'deleted' if qdrant_delete```lse 'not found/accessible'}")
+    print("\n🚀 Ready for unified document processing!")
 
-from sentence_transformers import SentenceTransformer
-m = SentenceTransformer('jinaai/jina-embeddings-v3', trust_remote_code=True)
-print('✅ Model loaded successfully, dimension:', m.get_sentence_embedding_dimension())
-
-# %%
-from sentence_transformers import SentenceTransformer
-print('Loading Jina v3...')
-m = SentenceTransformer('jinaai/jina-embeddings-v3', trust_remote_code=True)
-print('✅ Success! Dimension:', m.get_sentence_embedding_dimension())
-print('Model loaded successfully')
-
-
-# %%
-from sentence_transformers import SentenceTransformer
-print('Loading Jina v3...')
-m = SentenceTransformer('jinaai/jina-embeddings-v3', trust_remote_code=True)
-print('✅ Success! Dimension:', m.get_sentence_embedding_dimension())
-# %%
-from sentence_transformers import SentenceTransformer
-import os
-# Temporarily bypass cache issues
-os.environ['TRANSFORMERS_CACHE'] = 'C:/temp/fresh_cache'
-print('Loading Jina v3 with fresh cache...')
-m = SentenceTransformer('jinaai/jina-embeddings-v3', trust_remote_code=True, cache_folder='C:/temp/fresh_cache')
-print('✅ Success! Dimension:', m.get_sentence_embedding_dimension())
-# %%
-import torch
-
-# In your _embed method, add after processing batches:
-if torch.cuda.is_available():
-    torch.cuda.empty_cache()  # Clear memory after each file
+if __name__``` "__main__":
+    main()
 
 # %%

@@ -21,7 +21,8 @@ class AppConfig(BaseSettings):
     qdrant_url:       str  = "http://127.0.0.1:6333"
     embed_model:      str  = "jinaai/jina-embeddings-v3"
     embed_dim:        int  = 512                           # ← single source of truth
-    qdrant_collection:str  = "tender_docs_jina-v3_d512"    # schema tag shows dim
+    qdrant_collection: str = "tender_docs_jina-v3_d512_fresh"  # New name
+  # schema tag shows dim
 
     # ─── Embedding-time knobs ──────────────────────────────────────────────
     embed_batch_size:   int = 64            # for embedding model
@@ -29,15 +30,15 @@ class AppConfig(BaseSettings):
     embed_flush_chunks: int = 8000      # buffered gRPC upserts
 
     # ─── Chunking ──────────────────────────────────────────────────────────
-    chunk_size:    int = 2000
+    chunk_size:    int = 1000
     chunk_overlap: int = 200
 
     # ─── Retrieval ────────────────────────────────────────────────────────
     topk_candidate: int   = 100
-    final_k:        int   = 8
-    min_score:      float = 0.0          # start loose; tighten after eval
+    final_k:        int   = 16
+    min_score:      float = 0.1          # start loose; tighten after eval
     hnsw_ef_search: int   = 128
-    use_hybrid:     bool  = False
+    use_hybrid:     bool  = True
 
     # ─── Re-ranker (BGE-m3) ───────────────────────────────────────────────
     use_rerank:      bool   = True
