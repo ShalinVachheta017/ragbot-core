@@ -1,36 +1,50 @@
 # core/config.py
 from __future__ import annotations
 from pathlib import Path
-from pydantic_settings import BaseSettings, SettingsConfigDict  # <-- NEW
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
 class AppConfig(BaseSettings):
-    # env overrides like RAGBOT_QDRANT_URL=http://127.0.0.1:6333
     model_config = SettingsConfigDict(env_prefix="RAGBOT_", case_sensitive=False)
 
-    # Paths
-    raw_dir: Path = ROOT / "data" / "raw"
-    extract_dir: Path = ROOT / "data" / "extract"
+    # ─── Paths ─────────────────────────────────────────────────────────────
+    raw_dir:      Path = ROOT / "data" / "raw"
+    extract_dir:  Path = ROOT / "data" / "extract"
     metadata_dir: Path = ROOT / "data" / "metadata"
-    logs_dir: Path = ROOT / "data" / "logs"
-    state_dir: Path = ROOT / "data" / "state"
+    logs_dir:     Path = ROOT / "data" / "logs"
+    state_dir:    Path = ROOT / "data" / "state"
 
-    # Models / DB
-    embed_model: str = "intfloat/multilingual-e5-large"
-# core/config.py
-    llm_model = "qwen2.5:1.5b"
-    qdrant_url = "http://127.0.0.1:6333"
-    qdrant_collection: str = "tender_docs_m-e5-large_v1"
+    # ─── Models / Vector DB ────────────────────────────────────────────────
+    llm_model:        str  = "qwen2.5:1.5b"
+    qdrant_url:       str  = "http://127.0.0.1:6333"
+    embed_model:      str  = "jinaai/jina-embeddings-v3"
+    embed_dim:        int  = 512                           # ← single source of truth
+    qdrant_collection:str  = "tender_docs_jina-v3_d512"    # schema tag shows dim
 
-    # Chunking / Retrieval
-    chunk_size: int = 1400
-    chunk_overlap: int = 180
-    topk_candidate: int = 20
-    final_k: int = 8
-    min_score: float = 0.25
-    hnsw_ef_search: int = 64
-    use_hybrid: bool = True
-    use_rerank: bool = False
+    # ─── Embedding-time knobs ──────────────────────────────────────────────
+    embed_batch_size:   int = 64            # for embedding model
+    max_seq_length:     int = 8192
+    embed_flush_chunks: int = 8000      # buffered gRPC upserts
+
+    # ─── Chunking ──────────────────────────────────────────────────────────
+    chunk_size:    int = 2000
+    chunk_overlap: int = 200
+
+    # ─── Retrieval ────────────────────────────────────────────────────────
+    topk_candidate: int   = 100
+    final_k:        int   = 8
+    min_score:      float = 0.0          # start loose; tighten after eval
+    hnsw_ef_search: int   = 128
+    use_hybrid:     bool  = False
+
+    # ─── Re-ranker (BGE-m3) ───────────────────────────────────────────────
+    use_rerank:      bool   = True
+    reranker_model:  str    = "BAAI/bge-reranker-v2-m3"
+    rerank_keep:     int    = 24
+    rerank_weight:   float  = 0.8
+    rerank_batch_size:int   = 64
+
 
 CFG = AppConfig()

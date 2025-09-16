@@ -5,7 +5,7 @@ from pathlib import Path
 from dataclasses import dataclass
 import hashlib, json, csv, logging, zipfile
 from datetime import datetime
-from typing import Iterable, List, Optional, Tuple , Dict
+from typing import Iterable, List, Optional, Tuple, Dict
 
 from .domain import DocumentPage
 
@@ -13,6 +13,11 @@ import langdetect
 import fitz  # PyMuPDF
 import docx  # python-docx
 import pandas as pd 
+
+# 🆕 OCR imports
+import pytesseract
+from PIL import Image
+import io
 
 from .config import CFG
 
@@ -150,20 +155,89 @@ class ExcelCleaner:
         return out_xlsx
 
 class PDFLoader:
-    """Return one DocumentPage per PDF page with basic metadata."""
+    """🔧 ENHANCED: PDF loader with OCR fallback for scanned documents"""
+    def __init__(self, use_ocr: bool = True):
+        self.use_ocr = use_ocr
+        self.ocr_stats = {"attempted": 0, "successful": 0, "failed": 0}
+        
     def load_pages(self, pdf_path: Path) -> List[DocumentPage]:
-        import fitz  # PyMuPDF
+        """Load pages with OCR fallback for scanned documents"""
         pages: List[DocumentPage] = []
-        with fitz.open(pdf_path) as doc:
-            for i, page in enumerate(doc, start=1):
-                text = page.get_text() or ""
-                pages.append(DocumentPage(
-                    page_number=i,
-                    text=text,
-                    source_path=pdf_path,
-                    meta={"loader": "pymupdf"}
-                ))
-        return pages
+        
+        try:
+            with fitz.open(pdf_path) as doc:
+                for page_num in range(len(doc)):
+                    page = doc[page_num]
+                    
+                    # Try to extract text normally first
+                    text = page.get_text().strip()
+                    
+                    # If no meaningful text found and OCR is enabled, try OCR
+                    if len(text) < 50 and self.use_ocr:  # Less than 50 chars = likely scanned
+                        ocr_text = self._ocr_page(page, page_num, pdf_path.name)
+                        if ocr_text:
+                            text = ocr_text
+                    
+                    # Only add page if we got some meaningful text
+                    if text and len(text.strip()) > 10:
+                        pages.append(DocumentPage(
+                            page_number=page_num + 1,
+                            text=text,
+                            source_path=pdf_path,
+                            meta={
+                                "loader": "pymupdf",
+                                "used_ocr": len(text) > 50 and not page.get_text().strip()
+                            }
+                        ))
+            
+            return pages
+            
+        except Exception as e:
+            logging.error(f"Error loading PDF {pdf_path}: {e}")
+            return []
+
+    def _ocr_page(self, page, page_num: int, filename: str) -> str:
+        """Extract text from page using OCR"""
+        self.ocr_stats["attempted"] += 1
+        
+        try:
+            # Convert PDF page to image with higher resolution for better OCR
+            matrix = fitz.Matrix(2.0, 2.0)  # 2x zoom for better quality
+            pix = page.get_pixmap(matrix=matrix)
+            img_data = pix.tobytes("png")
+            pix = None  # Free memory immediately
+            
+            # Convert to PIL Image
+            image = Image.open(io.BytesIO(img_data))
+            
+            # Perform OCR with German + English language support
+            text = pytesseract.image_to_string(
+                image, 
+                lang='deu+eng',  # German + English
+                config='--psm 6 --oem 3 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzäöüßÄÖÜ0123456789.,!?:;()-€/\\ \t\n'
+            )
+            
+            image.close()
+            
+            # Clean up OCR text
+            text = text.strip()
+            
+            # Only keep results with meaningful content
+            if len(text) >= 20:  # At least 20 characters
+                self.ocr_stats["successful"] += 1
+                logging.info(f"📖 OCR extracted {len(text)} chars from {filename} page {page_num + 1}")
+                return text
+            else:
+                return ""
+                
+        except Exception as e:
+            self.ocr_stats["failed"] += 1
+            logging.error(f"OCR failed on {filename} page {page_num + 1}: {e}")
+            return ""
+
+    def get_ocr_stats(self) -> Dict[str, int]:
+        """Get OCR processing statistics"""
+        return self.ocr_stats.copy()
 
 class ExcelMetadataJoiner:
     """Join cleaned Excel metadata onto payloads by dtad_id or filename stem."""
