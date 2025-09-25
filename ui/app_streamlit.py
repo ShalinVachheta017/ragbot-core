@@ -1,43 +1,67 @@
+# app_streamlit.py
 """
 RAG Bot (Local): Qdrant + Ollama
-- E5 embeddings + DTAD-aware filtering in search
+- Jina v3 embeddings + DTAD-aware filtering in search
 - Metadata-aware routing (DTAD-ID + Region/Year queries)
 """
 
 from __future__ import annotations
 import os, re, logging
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
+from pathlib import Path
+import sys
+
 import streamlit as st
-import ollama
 import pandas as pd
 
-from rag_qdrant import search, abs_source_path, QDRANT_COLLECTION
-from config import QDRANT_URL
+# ---- import shim so 'core' is always importable ----
+ROOT = Path(__file__).resolve().parent.parent  # project root
+for p in (ROOT, ROOT / "core"):
+    sp = str(p)
+    if sp not in sys.path:
+        sys.path.insert(0, sp)
+
+from core.config import CFG
+from core.qa import retrieve_candidates  # NEW retriever
 
 # --- Logging ---
 logger = logging.getLogger("app_streamlit")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
-# --- Load metadata ---
-metadata_path = "metadata/cleaned_metadata.xlsx"
+# --- Load metadata (normalized) ---
+def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [c.strip().replace(" ", "_").replace("-", "_").lower() for c in df.columns]
+    return df
+
 try:
-    metadata_df = pd.read_excel(metadata_path)
-    logger.info(f"Loaded metadata from {metadata_path}, {len(metadata_df)} rows")
+    meta_path = CFG.metadata_path  # e.g., metadata/cleaned_metadata.xlsx
+except AttributeError:
+    # backward-compat if metadata_path property not present
+    meta_path = CFG.metadata_dir / "cleaned_metadata.xlsx"
+
+try:
+    if Path(meta_path).exists():
+        metadata_df = pd.read_excel(meta_path)
+        metadata_df = _normalize_cols(metadata_df)
+        logger.info(f"Loaded metadata from {meta_path}, {len(metadata_df)} rows")
+    else:
+        logger.warning(f"Metadata not found at {meta_path}")
+        metadata_df = pd.DataFrame()
 except Exception as e:
     logger.error(f"Could not load metadata: {e}")
     metadata_df = pd.DataFrame()
 
-# Normalize column names for safety
-metadata_df.columns = [c.strip().replace(" ", "_").replace("-", "_") for c in metadata_df.columns]
-
-# Dynamic region dictionary
-region_list = sorted(set(str(r).lower() for r in metadata_df.get("Region", []) if pd.notna(r)))
-
+# Dynamic region dictionary (normalized)
+region_list = sorted(
+    {str(r).strip().lower() for r in (metadata_df.get("region", []) if not metadata_df.empty else []) if pd.notna(r)}
+)
 
 # --- Streamlit Page ---
-st.set_page_config(page_title="RAG Bot (Local)", page_icon="🧠", layout="wide")
-st.markdown("""
+st.set_page_config(page_title="Tender Bot (Local)", page_icon="🧠", layout="wide")
+st.markdown(
+    """
 <style>
 [data-testid="stAppViewContainer"] { background: #0e0f13; }
 .block-container { padding-top: 1.3rem; }
@@ -49,14 +73,14 @@ st.markdown("""
 .warn { background: #1d1b10; border: 1px solid #544b22; color: #e5d480; padding: 10px 12px; border-radius: 12px; }
 hr { border-color: #243043; }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
-
-# --- Sidebar ---
-st.sidebar.title("Settings")
-
+# ---- helpers ----
 def list_local_models() -> List[str]:
     try:
+        import ollama  # lazy import so app still runs without it
         resp = ollama.list()
         models = resp.models if hasattr(resp, "models") else resp.get("models", [])
         names = [m.model for m in models] if models and hasattr(models[0], "model") else [m["name"] for m in models]
@@ -65,8 +89,41 @@ def list_local_models() -> List[str]:
     except Exception:
         return ["qwen2.5:1.5b"]
 
+def abs_source_path(src: str) -> Path:
+    """Resolve a payload 'source_path' to a local file under extract/ if needed."""
+    p = Path(src) if src else Path("")
+    if p.exists():
+        return p
+    return (CFG.extract_dir / p.name) if p.name else CFG.extract_dir
+
+def llm_chat(model: str, messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
+    # prefer Ollama python client
+    try:
+        import ollama
+        resp = ollama.chat(model=model, messages=messages, options={"temperature": temperature})
+        return resp["message"]["content"]
+    except Exception as e_client:
+        # HTTP fallback
+        try:
+            import requests, json
+            r = requests.post(
+                "http://127.0.0.1:11434/api/chat",
+                json={"model": model, "messages": messages, "options": {"temperature": temperature}},
+                timeout=60,
+            )
+            r.raise_for_status()
+            data = r.json()
+            if "message" in data and "content" in data["message"]:
+                return data["message"]["content"]
+            return json.dumps(data)[:2000]
+        except Exception as e_http:
+            return f"(Ollama unavailable: {e_client} | HTTP: {e_http})"
+
+# --- Sidebar ---
+st.sidebar.title("Settings")
+
 MODEL_NAME = st.sidebar.selectbox("Ollama model", list_local_models(), index=0)
-top_k = st.sidebar.slider("Top-K passages", 1, 20, 8)
+top_k = st.sidebar.slider("Top-K passages", 1, 20, int(getattr(CFG, "top_k", 8)))
 temperature = st.sidebar.slider("Temperature", 0.0, 1.0, 0.2, 0.05)
 history_k = st.sidebar.slider("Use last K turns as memory", 2, 8, 3)
 show_debug = st.sidebar.checkbox("Show retrieved chunks", value=False)
@@ -82,18 +139,22 @@ with mid:
     if "messages" not in st.session_state:
         st.session_state.messages = []
     md = "\n\n".join([f"**{m['role'].title()}**: {m['content']}" for m in st.session_state.messages])
-    st.download_button("⬇️ Export chat (.md)", data=md, file_name="chat.md", mime="text/markdown", use_container_width=True)
+    st.download_button(
+        "⬇️ Export chat (.md)",
+        data=md,
+        file_name="chat.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
 
 st.sidebar.write("---")
-st.sidebar.caption(f"Qdrant: `{QDRANT_URL}`  \nCollection: `{QDRANT_COLLECTION}`")
-
+st.sidebar.caption(f"Qdrant: `{CFG.qdrant_url}`  \nCollection: `{CFG.qdrant_collection}`")
 
 # --- Session State ---
 if "messages" not in st.session_state:
     st.session_state.messages: List[Dict[str, str]] = []
 if "last_hits" not in st.session_state:
     st.session_state.last_hits = []
-
 
 # --- Prompts ---
 SYSTEM_PROMPT = (
@@ -116,7 +177,6 @@ FALLBACK_PROMPT = (
     "Never invent tender-specific facts or details."
 )
 
-
 # --- Helpers ---
 def build_context(hits) -> Tuple[str, List[Dict[str, Any]]]:
     ctx_lines, items = [], []
@@ -125,70 +185,98 @@ def build_context(hits) -> Tuple[str, List[Dict[str, Any]]]:
         items.append({"i": i, "source": h.source, "score": round(float(h.score), 3)})
     return "\n\n".join(ctx_lines), items
 
-
 def augmentation_from_history(history: List[Dict[str, str]], k: int) -> str:
-    if not history: return ""
-    tail = history[-(2*k):]
+    if not history:
+        return ""
+    tail = history[-(2 * k) :]
     return "\n".join([f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}" for m in tail])
 
+def _dtad_match(df: pd.DataFrame, raw_id: str) -> pd.DataFrame:
+    """
+    Robust match for DTAD-ID:
+      - Treat as string, strip, remove trailing '.0' if any
+      - Zero-pad to 8 chars
+    """
+    if "dtad_id" not in df.columns:
+        return df.iloc[0:0]
+    want = str(raw_id).strip()
+    want = re.sub(r"\.0$", "", want)
+    want = want.zfill(8) if want.isdigit() else want
 
-def llm_chat(model: str, messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
-    resp = ollama.chat(model=model, messages=messages, options={"temperature": temperature})
-    return resp["message"]["content"]
-
+    col = df["dtad_id"].astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
+    col = col.str.zfill(8).where(col.str.isnumeric(), col)  # keep non-numeric as-is
+    return df[col == want]
 
 def lookup_metadata(query: str) -> str | None:
     """Answer structured queries from metadata (DTAD-ID, year, region)."""
-    q = query.lower()
+    if metadata_df.empty:
+        return None
 
-    # 1. Exact DTAD-ID lookup
+    q_lower = query.lower()
+
+    # 1) Exact DTAD-ID lookup
     m = re.search(r"\b(\d{7,8})\b", query)
-    if m and "dtad_id" in metadata_df.columns:
-        dtad_id = int(m.group(1))
-        row = metadata_df.loc[metadata_df["dtad_id"] == dtad_id]
+    if m:
+        row = _dtad_match(metadata_df, m.group(1))
         if not row.empty:
             r = row.iloc[0]
-            logger.info(f"Metadata hit for DTAD-ID {dtad_id}")
+            logger.info(f"Metadata hit for DTAD-ID {m.group(1)}")
             return (
-                f"DTAD-ID {dtad_id} | Titel: {r.get('Titel','')} | "
-                f"Datum: {r.get('Datum','')} | Region: {r.get('Region','')} | "
-                f"Vergabestelle: {r.get('Name_der_Vergabestelle') or r.get('Vergabestelle_komplett','')} | "
-                f"Quelle: {r.get('Source_URL','')}"
+                f"DTAD-ID {str(r.get('dtad_id','')).zfill(8)} | "
+                f"Titel: {r.get('titel','')} | "
+                f"Datum: {r.get('datum','')} | "
+                f"Region: {r.get('region','')} | "
+                f"Vergabestelle: {r.get('name_der_vergabestelle') or r.get('vergabe­stelle_komplett','')} | "
+                f"Quelle: {r.get('source_url','')}"
             )
         else:
-            logger.warning(f"DTAD-ID {dtad_id} not found in metadata")
+            logger.warning(f"DTAD-ID {m.group(1)} not found in metadata")
             return "Not in the tender data."
 
-    # 2. Year + Region queries
-    year_match = re.search(r"(20\d{2})", query)
+    # 2) Year + Region filters
     df = metadata_df.copy()
+    # Year: prefer derived 'year' if present, else substring on 'datum'
+    y_match = re.search(r"(20\d{2})", query)
+    if y_match:
+        if "year" in df.columns:
+            try:
+                y = int(y_match.group(1))
+                df = df[df["year"] == y]
+            except Exception:
+                pass
+        elif "datum" in df.columns:
+            df = df[df["datum"].astype(str).str.contains(y_match.group(1), na=False)]
 
-    if year_match and "Datum" in df.columns:
-        df = df[df["Datum"].astype(str).str.contains(year_match.group(1), na=False)]
-
+    # Region by substring match
     for region in region_list:
-        if region in q:
-            df = df[df["Region"].str.lower().str.contains(region, na=False)]
+        if region and region in q_lower and "region" in df.columns:
+            df = df[df["region"].astype(str).str.lower().str.contains(region, na=False)]
             break
 
-    if not df.empty and (year_match or any(r in q for r in region_list)):
+    if not df.empty and (y_match or any(r in q_lower for r in region_list)):
         logger.info(f"Metadata hit for region/year query: {query}")
-        return "\n".join([
-            f"DTAD-ID {r['dtad_id']} | Titel: {r['Titel']} | Datum: {r['Datum']} | Region: {r['Region']} | Quelle: {r.get('Source_URL','')}"
-            for _, r in df.head(5).iterrows()
-        ])
+        # show top 5
+        lines = []
+        for _, r in df.head(5).iterrows():
+            lines.append(
+                f"DTAD-ID {str(r.get('dtad_id','')).zfill(8)} | "
+                f"Titel: {r.get('titel','')} | "
+                f"Datum: {r.get('datum','')} | "
+                f"Region: {r.get('region','')} | "
+                f"Quelle: {r.get('source_url','')}"
+            )
+        return "\n".join(lines)
 
     return None  # fallback to retrieval
 
-
 def answer_with_rag(query: str, model: str, top_k: int, temperature: float, history_text: str):
-    # Step 1: Metadata
+    # Step 1: Metadata route
     meta_answer = lookup_metadata(query)
     if meta_answer:
         return meta_answer, [], True
 
-    # Step 2: Qdrant
-    hits = search(query, top_k=top_k)
+    # Step 2: Dense retrieval via core.qa
+    hits = retrieve_candidates(query, CFG)[:top_k]
     st.session_state.last_hits = hits
     weak = (not hits) or (float(hits[0].score) < 0.58)
 
@@ -205,9 +293,9 @@ def answer_with_rag(query: str, model: str, top_k: int, temperature: float, hist
     logger.warning("Fallback path used")
     return "Not in the tender data.", hits, False
 
-
 def render_sources(hits):
-    if not hits: return
+    if not hits:
+        return
     st.subheader("Sources")
     for i, h in enumerate(hits, start=1):
         with st.container(border=True):
@@ -220,7 +308,7 @@ def render_sources(hits):
                     unsafe_allow_html=True,
                 )
             with c2:
-                if path.exists():
+                if path.exists() and path.is_file():
                     data = path.read_bytes()
                     st.download_button(
                         f"Download [{i}]",
@@ -232,7 +320,6 @@ def render_sources(hits):
                     )
                 else:
                     st.button("Missing file", disabled=True, use_container_width=True)
-
 
 # --- Header + Chat UI ---
 st.title("RAG Bot (Local): Qdrant + Ollama")
@@ -274,7 +361,7 @@ if go and user_q.strip():
 
     st.session_state.messages.append({"role": "user", "content": user_q})
     hist = st.session_state.messages[:-1]
-    history_text = (" \n".join([f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}" for m in hist[-(2*history_k):]]))
+    history_text = " \n".join([f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}" for m in hist[-(2 * history_k) :]])
 
     grounded_text, hits, grounded = answer_with_rag(user_q, MODEL_NAME, top_k, temperature, history_text)
     if grounded:
@@ -283,7 +370,11 @@ if go and user_q.strip():
     else:
         warn = "⚠️ This answer is **not grounded** in your private documents."
         st.session_state.messages.append({"role": "assistant", "content": f"<div class='warn'>{warn}</div>"})
-        out = llm_chat(MODEL_NAME, [{"role": "system", "content": FALLBACK_PROMPT}, {"role": "user", "content": user_q}], temperature=temperature)
+        out = llm_chat(
+            MODEL_NAME,
+            [{"role": "system", "content": FALLBACK_PROMPT}, {"role": "user", "content": user_q}],
+            temperature=temperature,
+        )
         st.session_state.messages.append({"role": "assistant", "content": out})
         st.rerun()
 

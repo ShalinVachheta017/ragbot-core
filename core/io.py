@@ -1,31 +1,47 @@
 # core/io.py
 from __future__ import annotations
 from pathlib import Path
-
 from dataclasses import dataclass
 import hashlib, json, csv, logging, zipfile
 from datetime import datetime
-from typing import Iterable, List, Optional, Tuple, Dict
+from typing import List, Dict, Optional
 
 from .domain import DocumentPage
 
 import langdetect
 import fitz  # PyMuPDF
 import docx  # python-docx
-import pandas as pd 
+import pandas as pd
 
-# 🆕 OCR imports
+# OCR
 import pytesseract
 from PIL import Image
 import io
 
 from .config import CFG
 
+# Optional cleaner (keeps punctuation, fixes hyphens, etc.)
+try:
+    from .text_cleaning import clean_text
+except Exception:
+    def clean_text(x: str) -> str:  # safe no-op fallback
+        return (x or "").strip()
+
+# ---- ensure dirs exist BEFORE logging config ----
+CFG.logs_dir.mkdir(parents=True, exist_ok=True)
+CFG.extract_dir.mkdir(parents=True, exist_ok=True)
+CFG.state_dir.mkdir(parents=True, exist_ok=True)
+CFG.metadata_dir.mkdir(parents=True, exist_ok=True)
+
 logging.basicConfig(
     filename=str(CFG.logs_dir / "data_preparation.log"),
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
+
+# use config if present; else default
+_OCR_LANGS = getattr(CFG, "ocr_langs", "deu+eng")
+
 
 @dataclass(frozen=True)
 class FileInfo:
@@ -34,11 +50,18 @@ class FileInfo:
     status: str
     lang: str = ""
 
+
 class ManifestRepo:
     """Minimal JSON set of processed ZIP hashes (or files) under data/state."""
-    def __init__(self, path: Path | None = None):
+    def __init__(self, path: Optional[Path] = None):
         self.path = path or (CFG.state_dir / "zip_manifest.json")
-        self._seen = set(json.loads(self.path.read_text("utf-8"))) if self.path.exists() else set()
+        if self.path.exists():
+            try:
+                self._seen = set(json.loads(self.path.read_text("utf-8")))
+            except Exception:
+                self._seen = set()
+        else:
+            self._seen = set()
 
     def seen(self, key: str) -> bool:
         return key in self._seen
@@ -47,8 +70,9 @@ class ManifestRepo:
         self._seen.add(key)
         self.path.write_text(json.dumps(sorted(self._seen)), encoding="utf-8")
 
+
 class ZipIngestor:
-    ALLOWED_EXT = {".pdf",".docx",".d83",".dwg",".jpg",".png",".tiff",".zip"}
+    ALLOWED_EXT = {".pdf", ".docx", ".d83", ".dwg", ".jpg", ".png", ".tiff", ".zip", ".txt"}
     MAX_MB = 100
 
     def __init__(self, manifest: ManifestRepo | None = None):
@@ -60,7 +84,7 @@ class ZipIngestor:
     def _sha256(self, p: Path) -> str:
         h = hashlib.sha256()
         with p.open("rb") as f:
-            for chunk in iter(lambda: f.read(1<<20), b""):
+            for chunk in iter(lambda: f.read(1 << 20), b""):
                 h.update(chunk)
         return h.hexdigest()
 
@@ -72,6 +96,8 @@ class ZipIngestor:
             if p.suffix.lower() == ".docx":
                 d = docx.Document(p)
                 return " ".join(par.text for par in d.paragraphs)[:3000]
+            if p.suffix.lower() == ".txt":
+                return p.read_text(errors="ignore")[:3000]
         except Exception:
             return ""
         return ""
@@ -83,11 +109,13 @@ class ZipIngestor:
         if size_mb > self.MAX_MB:
             return FileInfo(p, size_mb, "oversized")
         lang = ""
-        if p.suffix.lower() in {".pdf",".docx",".txt"}:
-            text = self._sample_text(p) if p.suffix.lower() in {".pdf",".docx"} else p.read_text(errors="ignore")[:3000]
+        if p.suffix.lower() in {".pdf", ".docx", ".txt"}:
+            text = self._sample_text(p)
             if text:
-                try: lang = langdetect.detect(text)
-                except Exception: lang = ""
+                try:
+                    lang = langdetect.detect(text)
+                except Exception:
+                    lang = ""
         return FileInfo(p, size_mb, "valid", lang)
 
     def _log_row(self, row: list[str]) -> None:
@@ -95,7 +123,8 @@ class ZipIngestor:
         new = not csv_path.exists()
         with csv_path.open("a", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            if new: w.writerow(["root_zip","nested_zip","file","size_mb","status","lang"])
+            if new:
+                w.writerow(["root_zip", "nested_zip", "file", "size_mb", "status", "lang"])
             w.writerow(row)
 
     def _extract_zip(self, zip_path: Path, root_zip: Path) -> int:
@@ -110,7 +139,6 @@ class ZipIngestor:
                     out.parent.mkdir(parents=True, exist_ok=True)
                     with z.open(member) as src, out.open("wb") as dst:
                         dst.write(src.read())
-                    # recurse if nested zip
                     if out.suffix.lower() == ".zip":
                         count += self._extract_zip(out, root_zip)
                     else:
@@ -134,19 +162,19 @@ class ZipIngestor:
             self.manifest.add(h)
         return total
 
+
 class ExcelCleaner:
-    """Find latest Excel in raw_dir, clean, and write cleaned_metadata to metadata_dir."""
+    """Find latest Excel (recursively) in raw_dir, clean, and write cleaned_metadata to metadata_dir."""
     def run(self) -> Path:
-        exc = sorted(CFG.raw_dir.glob("*.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if not exc: raise FileNotFoundError("No .xlsx in data/raw")
+        exc = sorted(CFG.raw_dir.rglob("*.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not exc:
+            raise FileNotFoundError("No .xlsx in data/raw (recursively)")
         src = exc[0]
-        import pandas as pd
         df = pd.read_excel(src)
         df = df.dropna(how="all")
         df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
         if "dtad_id" in df.columns:
             df["dtad_id"] = df["dtad_id"].astype(str).str.strip()
-        CFG.metadata_dir.mkdir(parents=True, exist_ok=True)
         out_csv = CFG.metadata_dir / "cleaned_metadata.csv"
         out_xlsx = CFG.metadata_dir / "cleaned_metadata.xlsx"
         df.to_csv(out_csv, index=False, encoding="utf-8-sig")
@@ -154,90 +182,80 @@ class ExcelCleaner:
         logging.info(f"Cleaned metadata written: {out_csv}")
         return out_xlsx
 
+
 class PDFLoader:
-    """🔧 ENHANCED: PDF loader with OCR fallback for scanned documents"""
+    """PDF loader with OCR fallback for scanned documents"""
     def __init__(self, use_ocr: bool = True):
         self.use_ocr = use_ocr
         self.ocr_stats = {"attempted": 0, "successful": 0, "failed": 0}
-        
+
     def load_pages(self, pdf_path: Path) -> List[DocumentPage]:
-        """Load pages with OCR fallback for scanned documents"""
         pages: List[DocumentPage] = []
-        
         try:
             with fitz.open(pdf_path) as doc:
                 for page_num in range(len(doc)):
                     page = doc[page_num]
-                    
-                    # Try to extract text normally first
-                    text = page.get_text().strip()
-                    
-                    # If no meaningful text found and OCR is enabled, try OCR
-                    if len(text) < 50 and self.use_ocr:  # Less than 50 chars = likely scanned
+                    native_text = (page.get_text() or "").strip()
+                    text = native_text
+                    used_ocr = False
+
+                    # Heuristic: little/no text -> OCR
+                    if (len(native_text) < 50) and self.use_ocr:
                         ocr_text = self._ocr_page(page, page_num, pdf_path.name)
                         if ocr_text:
                             text = ocr_text
-                    
-                    # Only add page if we got some meaningful text
-                    if text and len(text.strip()) > 10:
-                        pages.append(DocumentPage(
-                            page_number=page_num + 1,
-                            text=text,
-                            source_path=pdf_path,
-                            meta={
-                                "loader": "pymupdf",
-                                "used_ocr": len(text) > 50 and not page.get_text().strip()
-                            }
-                        ))
-            
+                            used_ocr = True
+
+                    # Clean text for indexing
+                    text = clean_text(text)
+
+                    if text and len(text) > 10:
+                        pages.append(
+                            DocumentPage(
+                                page_number=page_num + 1,
+                                text=text,
+                                source_path=pdf_path,
+                                meta={"loader": "pymupdf", "used_ocr": used_ocr},
+                            )
+                        )
             return pages
-            
         except Exception as e:
             logging.error(f"Error loading PDF {pdf_path}: {e}")
             return []
 
     def _ocr_page(self, page, page_num: int, filename: str) -> str:
-        """Extract text from page using OCR"""
+        """Extract text from page using OCR (pytesseract fallback)"""
         self.ocr_stats["attempted"] += 1
-        
         try:
-            # Convert PDF page to image with higher resolution for better OCR
-            matrix = fitz.Matrix(2.0, 2.0)  # 2x zoom for better quality
-            pix = page.get_pixmap(matrix=matrix)
+            # 300 DPI render is a good balance
+            pix = page.get_pixmap(dpi=300)
             img_data = pix.tobytes("png")
-            pix = None  # Free memory immediately
-            
-            # Convert to PIL Image
+            del pix
+
             image = Image.open(io.BytesIO(img_data))
-            
-            # Perform OCR with German + English language support
-            text = pytesseract.image_to_string(
-                image, 
-                lang='deu+eng',  # German + English
-                config='--psm 6 --oem 3 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzäöüßÄÖÜ0123456789.,!?:;()-€/\\ \t\n'
-            )
-            
-            image.close()
-            
-            # Clean up OCR text
-            text = text.strip()
-            
-            # Only keep results with meaningful content
-            if len(text) >= 20:  # At least 20 characters
+            try:
+                text = pytesseract.image_to_string(
+                    image,
+                    lang=_OCR_LANGS,
+                    config="--oem 1 --psm 6",
+                )
+            finally:
+                image.close()
+
+            text = (text or "").strip()
+            if len(text) >= 20:
                 self.ocr_stats["successful"] += 1
-                logging.info(f"📖 OCR extracted {len(text)} chars from {filename} page {page_num + 1}")
+                logging.info(f"OCR extracted {len(text)} chars from {filename} p{page_num + 1}")
                 return text
-            else:
-                return ""
-                
+            return ""
         except Exception as e:
             self.ocr_stats["failed"] += 1
             logging.error(f"OCR failed on {filename} page {page_num + 1}: {e}")
             return ""
 
     def get_ocr_stats(self) -> Dict[str, int]:
-        """Get OCR processing statistics"""
         return self.ocr_stats.copy()
+
 
 class ExcelMetadataJoiner:
     """Join cleaned Excel metadata onto payloads by dtad_id or filename stem."""
@@ -277,15 +295,13 @@ class ExcelMetadataJoiner:
         if not self._map:
             return meta
 
-        # prefer explicit dtad_id in meta
         key = str(meta.get("dtad_id", "")).strip()
         if not key:
-            # fallback: guess from filename digits (take first 8 if present)
-            stem_digits = "".join(ch for ch in path.stem if ch.isdigit())
+            stem_digits = "".join(ch for ch in Path(path).stem if ch.isdigit())
             key = stem_digits[:8] if len(stem_digits) >= 8 else stem_digits
 
         if key and key in self._map:
             merged = {**meta, **self._map[key]}
-            merged["dtad_id"] = key  # ensure string
+            merged["dtad_id"] = key
             return merged
         return meta

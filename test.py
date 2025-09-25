@@ -1,133 +1,106 @@
 #%%
-##!/usr/bin/env python3
-"""
-Nuclear cleanup - removes ALL unwanted files an```ollections for fresh start
-"""
+# 1) Jina v3 loads and embeds
 
-import sh```l
+from sentence_transformers import SentenceTransformer
+m = SentenceTransformer("jinaai/jina-embeddings-v3", trust_remote_code=True)
+e = m.encode("hello", normalize_embeddings=True)
+print("dim:", len(e), "sample:", e[:5])
+
+
+# 2) Qdrant client import
+
+from qdrant_client import QdrantClient
+c = QdrantClient(url="http://127.0.0.1:6333")
+print("qdrant ok")
+
+# 3) OCRmyPDF presence (it will still need Ghostscript + qpdf system tools)
+
+import shutil
+print("ocrmypdf:", shutil.which("ocrmypdf"))
+print("tesseract:", shutil.which("tesseract"))
+
+
+# %%
+from sentence_transformers import SentenceTransformer
+m = SentenceTransformer("jinaai/jina-embeddings-v3", trust_remote_code=True)
+e = m.encode("hello", normalize_embeddings=True)
+print("dim:", len(e), "sample:", e[:5])
+
+# %%
+from huggingface_hub import HfApi
+print(HfApi().model_info("jinaai/jina-embeddings-v3").sha)
+# %%
+from sentence_transformers import SentenceTransformer
+m = SentenceTransformer("jinaai/jina-embeddings-v3", revision="f1944de8402dcd5f2b03f822a4bc22a7f2de2eb9", trust_remote_code=True)
+e = m.encode("hello", normalize_embeddings=True)
+print("dim:", len(e))
+
+
+# %%
+import shutil
 from pathlib import Path
-import os```ef cleanup_scripts_and_ui():
-    """Clean unw```ed files from scripts and UI directories"""
+import os
+
+def delete_qdrant_collection():
+    """Delete existing Qdrant collection"""
     
-    project```ot = Path(__file__).parent.parent
-    
-    #```wanted script files to remove
-    unwanted_scripts =``` [
-        "debug_tender_bot.py",
-        "pytorch_fix_chat.py", 
-        "working_chat.py",
-        "clean_tender_bot.py",
-        "simple_fresh_pipeline.py",
-        "test.py",
-        "working_pipeline.py",
-        "check_existing.py"
-    ]
-    
-    #```wanted UI files (patterns)
-    unwanted_ui_```terns = [
-        "debug_*.py",
-        "pytorch_*.py", 
-        "working_*.py",
-        "clean_*.py",
-        "simple_*.py",
-        "minimal_*.py",
-        "test_*.py"
-    ]
-    
-    print``` Cleaning scripts directory```")
-    scripts_dir = project_root / "```ipts"
-    removed_```nt = 0
-    
-    for```ript_name in unwanted_scripts:```      script_path = scripts_dir / script_name
-        if script```th.exists():
-            script```th.unlink()
-            ```nt(f"  ❌ Removed: {```ipt_name}")
-            removed_count += 1
-    
-    ```nt(f"\n🧹 Cleaning UI directory...")
-    ui_dir```project_root / "ui"```  
-    for pattern in unwanted_ui_patterns:```      for file_path in ui_dir.glob(```tern):
-            if file_path```ists():
-                file_path```link()
-                print(f"  ❌```moved: {file_path.name}")
-                ```oved_count += 1
-    ```  # Remove cache```rectories
-    for cache_dir in [scripts_dir / "__pycache__", ui_dir / "__pycache__"]:
-        if cache_dir.exists```
-            shutil.rmtree(cache_dir)
-            ```nt(f"  ❌ Removed: {cache_dir```lative_to(project_root)}")```          removed_count += 1
-    ```  print(f"✅ Removed {removed_count```nwanted files/directories")```ef delete_qdrant_collection():
-    """Delete```isting Qdrant collection"""```  
     try:
-        from```rant_client import Q```ntClient
-        from core.config import CF```       
+        from qdrant_client import QdrantClient
+        from core.config import CFG
+        
         print("\n🗑️ Connecting to Qdrant...")
-        ```ent = QdrantClient(url=CFG.```ant_url)
-        ```      collections = client.get_collections().```lections
+        client = QdrantClient(url=CFG.qdrant_url)
+        
+        collections = client.get_collections().collections
         collection_names = [c.name for c in collections]
         
-        if CF```drant_collection in collection_names:
-            print(```️ Deleting collection```CFG.qdrant_collection}")
-            client.delete```llection(CFG.qdrant_collection)
-            print("```drant collection deleted successfully")
-            ```urn True
+        if CFG.qdrant_collection in collection_names:
+            print(f"🗑️ Deleting collection: {CFG.qdrant_collection}")
+            client.delete_collection(CFG.qdrant_collection)
+            print("✅ Qdrant collection deleted successfully")
+            return True
         else:
-            print(f"```No collection named '{CFG.qdrant_collection```found")
+            print(f"ℹ️ No collection named '{CFG.qdrant_collection}' found")
             return False
             
-    except Import```or:
-        print("⚠️ ```ant_client not available - install with: pip install qdrant-```ent")
+    except ImportError:
+        print("⚠️ qdrant_client not available - install with: pip install qdrant-client")
         return False
     except Exception as e:
-        print```❌ Could not delete Qdrant collection:```}")
+        print(f"❌ Could not delete Qdrant collection: {e}")
         return False
-
-def cleanup```ta_directories():
-    """Clean data```rectories for fresh start"""
     
-    project```ot = Path(__file__).parent.parent
-    
-    #```rectories to clean (but preserve structure)
-    cleanup```rs = [
-        "data/logs", 
-        "data/runs",
-        "data/state",
-        "logs"
-    ]
-    
-    print```n🗑️ Cleaning data directories...")
-    
-    for dir_name``` cleanup_dirs:
-        dir```th = project_root / dir```me
-        if dir_path```ists():
-            shutil.rmtree(dir_```h)
-            print(f"  ❌ Removed:```ir_name}")
-    
-    #```create essential directories
-    essential_dirs = [
-        "data/extract",
-        "data/logs",
-        "logs"
-    ]
-    
-    for```r_name in essential_dirs:```      (project_root / dir_name).```ir(parents=True, exist_```True)
-        print(``` 📁 Created: {dir_name```
-
 def main():
-    print``` Starting Nuclear Cleanup")```  print("=" * 50```   
-    # Step 1: Clean files```  cleanup_scripts_and_ui()```  
-    # Step 2:```lete Qdrant collection
-    ```ant_deleted = delete_qdrant_collection```    
-    # Step 3: Clean data directories  ```  cleanup_data_directories()```  
-    # Summary```  print("\n" + "=" * 50)
-    print("🎉 NUCLEAR```EANUP COMPLETE!")
-    print("=" * ```
-    print("✅ Unw```ed script/UI files removed")
-    print("```ata directories cleaned")
-    print(```'✅' if qdrant_deleted else '```} Qdrant collection {'deleted' if qdrant_delete```lse 'not found/accessible'}")
+    print("🚀 Starting Nuclear Cleanup")
+    print("=" * 50)
+    
+    
+    # Step 2: Delete Qdrant collection
+    qdrant_deleted = delete_qdrant_collection()
+    
+    # Summary
+    print("\n" + "=" * 50)
+    print("🎉 NUCLEAR CLEANUP COMPLETE!")
+    print("=" * 50)
+    print("✅ Unwanted script/UI files removed")
+    print("✅ Data directories cleaned")
+    print(f"{'✅' if qdrant_deleted else '⚠️'} Qdrant collection {'deleted' if qdrant_deleted else 'not found/accessible'}")
     print("\n🚀 Ready for unified document processing!")
 
-if __name__``` "__main__":
+if __name__ == "__main__":
     main()
 
+# %%
+# Must point to ...\envs\mllocalag\python.exe
+conda run -n mllocalag python -c "import sys; print(sys.executable)"
+
+# Packaging + HF stack
+conda run -n mllocalag python -c "import packaging, importlib.metadata as md; print(packaging.__version__, md.version('packaging'))"
+conda run -n mllocalag python -c "import transformers, sentence_transformers; print(transformers.__version__, sentence_transformers.__version__)"
+
+# CUDA present?
+conda run -n mllocalag python -c "import torch; print('torch', torch.__version__, 'cuda?', torch.cuda.is_available())"
+
+# No broken deps
+conda run -n mllocalag python -m pip check
 # %%
