@@ -1,5 +1,5 @@
 # ---- Vector DB ----
-qdrant-client>=1.9,<2.0
+qdrant-client>=1.8,<2.0
 
 # ---- Embeddings / HF stack (needed for Jina v3 remote code) ----
 sentence-transformers>=3.0.1

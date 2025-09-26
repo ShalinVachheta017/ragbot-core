@@ -104,3 +104,14 @@ conda run -n mllocalag python -c "import torch; print('torch', torch.__version__
 # No broken deps
 conda run -n mllocalag python -m pip check
 # %%
+import pytesseract
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+# %% 
+import pytesseract 
+import PIL 
+import subprocess,sys
+print('pytesseract OK')
+subprocess.check_call(['tesseract','--version'])
+
+# %%

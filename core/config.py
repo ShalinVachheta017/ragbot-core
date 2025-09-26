@@ -22,7 +22,8 @@ class AppConfig(BaseSettings):
 
     # ─── Models / Vector DB ────────────────────────────────────────────────
     llm_model:         str  = "qwen2.5:1.5b"
-    qdrant_url:        str  = "http://127.0.0.1:6333"
+    qdrant_url: str = "http://localhost:6333" # health check URL
+
 
     # Embeddings (Jina v3 = 1024-D)
     embed_model:       str  = "jinaai/jina-embeddings-v3"
