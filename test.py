@@ -90,52 +90,81 @@ def main():
 if __name__ == "__main__":
     main()
 
-# %%
-# Must point to ...\envs\mllocalag\python.exe
-conda run -n mllocalag python -c "import sys; print(sys.executable)"
 
-# Packaging + HF stack
-conda run -n mllocalag python -c "import packaging, importlib.metadata as md; print(packaging.__version__, md.version('packaging'))"
-conda run -n mllocalag python -c "import transformers, sentence_transformers; print(transformers.__version__, sentence_transformers.__version__)"
-
-# CUDA present?
-conda run -n mllocalag python -c "import torch; print('torch', torch.__version__, 'cuda?', torch.cuda.is_available())"
-
-# No broken deps
-conda run -n mllocalag python -m pip check
-# %%
-import pytesseract
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-
-# %% 
-import pytesseract 
-import PIL 
-import subprocess,sys
-print('pytesseract OK')
-subprocess.check_call(['tesseract','--version'])
 
 # %%
-# sanity_check.py (run: python sanity_check.py)
-from core.config import CFG
-from core.qa import retrieve_candidates
-test_qs = [
-    "VOB Regelungen für Nachunternehmer",
-    "Technische Spezifikationen für Straßenbau",
-    "Mindestlohn Bauprojekte",
-    "Submission deadline requirements 2022 NRW"
-]
-for q in test_qs:
-    hits = retrieve_candidates(q, CFG)[:5]
-    print("\nQ:", q, f"(top {len(hits)})")
-    for i,h in enumerate(hits,1):
-        src  = h.payload.get("source_path", "NA").split("/")[-1]
-        p1   = h.payload.get("page_start") or h.payload.get("page")
-        p2   = h.payload.get("page_end")
-        page = f"p{p1}" if p2 in (None, p1) else f"p{p1}-{p2}"
-        print(f"  {i:>2}. {h.score:.3f} | {src} | {page}")
-        # quick payload health
-        assert "doc_hash" in h.payload, "missing doc_hash"
-        assert "chunk_idx" in h.payload, "missing chunk_idx"
-print("\n✅ Sanity retrieval finished")
+# Run this to check your metadata
+import pandas as pd
 
+print("Loading metadata file...")
+df = pd.read_excel('data/metadata/cleaned_metadata.xlsx')
+
+# Check structure
+print("\n" + "="*60)
+print("METADATA FILE ANALYSIS")
+print("="*60)
+
+print(f"\nTotal rows: {len(df)}")
+print(f"\nAll columns ({len(df.columns)}):")
+for i, col in enumerate(df.columns, 1):
+    print(f"  {i}. {col}")
+
+print("\n" + "="*60)
+print("SAMPLE DATA (first 3 rows):")
+print("="*60)
+print(df.head(3).to_string())
+
+print("\n" + "="*60)
+print("CHECKING KEY COLUMNS:")
+print("="*60)
+
+# Check for DTAD-ID variations
+dtad_variants = [col for col in df.columns if 'dtad' in col.lower()]
+if dtad_variants:
+    print(f"\n✅ Found DTAD column(s): {dtad_variants}")
+    for col in dtad_variants:
+        print(f"\n   Column '{col}' sample values:")
+        print(f"   {df[col].head(5).tolist()}")
+else:
+    print("\n❌ No DTAD-ID column found!")
+
+# Check for date columns
+date_variants = [col for col in df.columns if any(word in col.lower() for word in ['datum', 'date', 'zeit'])]
+if date_variants:
+    print(f"\n✅ Found date column(s): {date_variants}")
+    for col in date_variants:
+        print(f"\n   Column '{col}' sample values:")
+        print(f"   {df[col].head(5).tolist()}")
+else:
+    print("\n❌ No date column found!")
+
+# Check for region columns
+region_variants = [col for col in df.columns if any(word in col.lower() for word in ['region', 'ort', 'stadt', 'bundesland'])]
+if region_variants:
+    print(f"\n✅ Found region column(s): {region_variants}")
+    for col in region_variants:
+        print(f"\n   Column '{col}' unique values (first 10):")
+        print(f"   {df[col].dropna().unique()[:10].tolist()}")
+else:
+    print("\n❌ No region column found!")
+
+# Check for year column
+if 'year' in df.columns:
+    print(f"\n✅ Year column exists!")
+    print(f"   Values: {df['year'].value_counts().to_dict()}")
+else:
+    print(f"\n⚠️  No 'year' column - need to create from date column")
+
+print("\n" + "="*60)
+print("RECOMMENDATION:")
+print("="*60)
+
+if dtad_variants:
+    print(f"Use column '{dtad_variants[0]}' for DTAD-ID lookups")
+if date_variants:
+    print(f"Use column '{date_variants[0]}' for date filtering")
+if region_variants:
+    print(f"Use column '{region_variants[0]}' for region filtering")
+
+print("\n" + "="*60)
 # %%

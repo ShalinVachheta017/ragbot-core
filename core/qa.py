@@ -55,14 +55,28 @@ def _translate_to_de(text: str) -> str:
 def _assert_dims_match_once() -> None:
     """
     Fast-fail if someone switched the model or collection to a different dimension.
+    Skips check if collection doesn't exist yet.
     """
-    m = SentenceTransformer(CFG.embed_model, trust_remote_code=True)
-    dim = m.get_sentence_embedding_dimension()
-    client = QdrantClient(url=CFG.qdrant_url)
-    vecs = client.get_collection(CFG.qdrant_collection).config.params.vectors
-    qdim = vecs.size if hasattr(vecs, "size") else list(vecs.values())[0].size
-    if dim != qdim:
-        raise RuntimeError(f"Embedding dim mismatch: model={dim}, qdrant={qdim}")
+    try:
+        m = SentenceTransformer(CFG.embed_model, trust_remote_code=True)
+        dim = m.get_sentence_embedding_dimension()
+        client = QdrantClient(url=CFG.qdrant_url)
+        
+        # Check if collection exists before trying to access it
+        if not client.collection_exists(CFG.qdrant_collection):
+            import logging
+            logger = logging.getLogger("core.qa")
+            logger.warning(f"Qdrant collection '{CFG.qdrant_collection}' does not exist yet. Skipping dimension check.")
+            return
+            
+        vecs = client.get_collection(CFG.qdrant_collection).config.params.vectors
+        qdim = vecs.size if hasattr(vecs, "size") else list(vecs.values())[0].size
+        if dim != qdim:
+            raise RuntimeError(f"Embedding dim mismatch: model={dim}, qdrant={qdim}")
+    except Exception as e:
+        import logging
+        logger = logging.getLogger("core.qa")
+        logger.warning(f"Could not verify embedding dimensions: {e}")
 
 
 _assert_dims_match_once()

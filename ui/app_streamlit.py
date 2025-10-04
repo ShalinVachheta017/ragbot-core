@@ -1,3 +1,18 @@
+from __future__ import annotations
+
+# ---- CRITICAL: Apply packaging workaround BEFORE any other imports ----
+import importlib.metadata as _im
+_original_version = _im.version
+def _patched_version(dist_name: str) -> str:
+    if dist_name.lower() == 'packaging':
+        return '24.0'
+    return _original_version(dist_name)
+_im.version = _patched_version
+
+# ---- CRITICAL: Streamlit FIRST ----
+import streamlit as st
+st.set_page_config(page_title="Tender Bot (Local)", page_icon="🧠", layout="wide")
+
 # app_streamlit.py
 """
 RAG Bot (Local): Qdrant + Ollama
@@ -5,13 +20,10 @@ RAG Bot (Local): Qdrant + Ollama
 - Metadata-aware routing (DTAD-ID + Region/Year queries)
 """
 
-from __future__ import annotations
 import os, re, logging
 from typing import List, Dict, Any, Tuple, Optional
 from pathlib import Path
 import sys
-
-import streamlit as st
 import pandas as pd
 
 # ---- import shim so 'core' is always importable ----
@@ -58,8 +70,7 @@ region_list = sorted(
     {str(r).strip().lower() for r in (metadata_df.get("region", []) if not metadata_df.empty else []) if pd.notna(r)}
 )
 
-# --- Streamlit Page ---
-st.set_page_config(page_title="Tender Bot (Local)", page_icon="🧠", layout="wide")
+# --- Streamlit Page Styling ---
 st.markdown(
     """
 <style>
@@ -226,7 +237,7 @@ def lookup_metadata(query: str) -> str | None:
                 f"Titel: {r.get('titel','')} | "
                 f"Datum: {r.get('datum','')} | "
                 f"Region: {r.get('region','')} | "
-                f"Vergabestelle: {r.get('name_der_vergabestelle') or r.get('vergabe­stelle_komplett','')} | "
+                f"Vergabestelle: {r.get('name_der_vergabestelle') or r.get('vergabestelle__komplett','')} | "
                 f"Quelle: {r.get('source_url','')}"
             )
         else:
