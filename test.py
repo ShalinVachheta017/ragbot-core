@@ -115,3 +115,27 @@ print('pytesseract OK')
 subprocess.check_call(['tesseract','--version'])
 
 # %%
+# sanity_check.py (run: python sanity_check.py)
+from core.config import CFG
+from core.qa import retrieve_candidates
+test_qs = [
+    "VOB Regelungen für Nachunternehmer",
+    "Technische Spezifikationen für Straßenbau",
+    "Mindestlohn Bauprojekte",
+    "Submission deadline requirements 2022 NRW"
+]
+for q in test_qs:
+    hits = retrieve_candidates(q, CFG)[:5]
+    print("\nQ:", q, f"(top {len(hits)})")
+    for i,h in enumerate(hits,1):
+        src  = h.payload.get("source_path", "NA").split("/")[-1]
+        p1   = h.payload.get("page_start") or h.payload.get("page")
+        p2   = h.payload.get("page_end")
+        page = f"p{p1}" if p2 in (None, p1) else f"p{p1}-{p2}"
+        print(f"  {i:>2}. {h.score:.3f} | {src} | {page}")
+        # quick payload health
+        assert "doc_hash" in h.payload, "missing doc_hash"
+        assert "chunk_idx" in h.payload, "missing chunk_idx"
+print("\n✅ Sanity retrieval finished")
+
+# %%
