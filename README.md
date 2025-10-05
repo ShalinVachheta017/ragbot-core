@@ -36,27 +36,15 @@ This system runs **100% offline** on your local machine using:
 
 ## 🏗️ System Architecture
 
-```mermaid
-flowchart LR
-    A[📄 Tender Docs (PDF, Excel, Word, OCR)] --> B[🧹 Parser & Metadata Cleaner]
-    B --> C[✂️ Chunking + GPU Embeddings]
-    C --> D[(🗄️ Qdrant Vector DB)]
-    D --> E[🔎 Retriever (Top-K Search)]
-    E --> F[🤖 Cross-Encoder Reranker]
-    F --> G[🧠 LLM via Ollama]
-    G --> H[📝 Answer Generator]
-    H --> I[💻 Streamlit UI]
-
-    subgraph User
-        Q[❓ User Query]
-        R[📑 Structured Answer + Sources]
-    end
-
-    Q --> E
-    I --> R
-```
-
 ![System Architecture Diagram](diagram.png)
+
+**Pipeline Flow:**
+1. **Document Ingestion** → Parse tender docs (PDF, Excel, Word, OCR)
+2. **Processing** → Clean metadata + chunk documents + generate embeddings
+3. **Storage** → Store in Qdrant vector database
+4. **Retrieval** → User query → Top-K search → Optional reranking
+5. **Generation** → LLM (Ollama) generates answer with citations
+6. **UI** → Streamlit displays results
 
 ---
 
