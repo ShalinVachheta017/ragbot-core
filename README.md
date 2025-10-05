@@ -11,8 +11,6 @@ This system runs **100% offline** on your local machine using:
 - **Ollama** for local LLM inference (Qwen2.5, Llama, Mistral)
 - **Streamlit** for the web interface
 
-✅ **Production-Ready**: Fixed syntax errors, robust error handling, metadata integration, comprehensive documentation
-
 ---
 
 ## ✨ Key Features
@@ -29,7 +27,7 @@ This system runs **100% offline** on your local machine using:
 
 ### Production Features
 * ✅ **Graceful Error Handling** - Handles missing collections, network issues
-* � **Metadata Integration** - 112 tenders with normalized DTAD-ID, dates, regions  
+* � **Metadata Integration** - tenders with normalized DTAD-ID, dates, regions  
 * 🧪 **Test Suite** - Comprehensive test queries and validation scripts
 * 📖 **Complete Documentation** - Quickstart, production guide, testing guide
 * 🚀 **One-Command Deployment** - `deploy_production.py` script included
@@ -57,6 +55,8 @@ flowchart LR
     Q --> E
     I --> R
 ```
+
+![System Architecture Diagram](diagram.png)
 
 ---
 
@@ -133,7 +133,7 @@ streamlit run ui/app_streamlit.py
 
 * Query tender docs with natural language (DE/EN)
 * Filter by metadata (e.g. CPV codes, filenames)
-* Adjust `Top-K results` & reranker candidates
+* Adjust `Top-K results` & retrail chunks(optional)
 * Answers include **citations + categories + summaries**
 
 ---
@@ -216,276 +216,49 @@ The system handles various query types:
 
 ---
 
+
 ## 🔮 Roadmap & Future Enhancements
 
-### 🚧 Planned Core Improvements
+### 🎯 Core Improvements (Planned)
 
-**Retrieval Enhancement (High Priority)**
-- � **Hybrid Search** - Combine dense (semantic) + sparse (BM25) retrieval for better accuracy
-  - Implement BM25 keyword matching alongside vector search
-  - Weighted fusion (e.g., 70% dense + 30% sparse)
-  - Expected improvement: +15% recall, especially for exact term matches
-  
-- 🎯 **Reranker Integration** - Cross-encoder model to reorder retrieved chunks
-  - Model: `ms-marco-MiniLM-L-6-v2` or `bge-reranker-large`
-  - Two-stage pipeline: Fast retrieval (top-100) → Accurate reranking (top-8)
-  - Expected improvement: +20% precision, better relevance
-  
-- 📊 **Query Classification** - Route queries to optimal retrieval strategy
-  - Factual queries → Hybrid search
-  - Semantic queries → Dense only
-  - ID lookups → Metadata (already implemented ✅)
+**1. Hybrid Search (Dense + Sparse)**
+- Add BM25 keyword search alongside current dense vector search
+- Weighted fusion for better exact-match queries (CPV codes, DTAD-IDs)
+- Expected: +15% recall improvement
 
-**Evaluation & Quality (High Priority)**
-- 📈 **Automated Evaluation Framework**
-  - Metrics: Hit Rate, MRR, Precision@k, Recall@k, NDCG
-  - Faithfulness scoring (grounding check)
-  - Test suite with 50+ queries across categories
-  - Regression testing before deployments
-  
-- 🧪 **A/B Testing Infrastructure**
-  - Compare retrieval strategies (dense vs hybrid vs reranked)
-  - LLM model comparison (Qwen vs Llama vs Mistral)
-  - Prompt engineering experiments
-  - User feedback collection
+**2. Cross-Encoder Reranker**
+- Rerank top-K results before LLM generation
+- Model: `ms-marco-MiniLM-L-6-v2` or similar
+- Expected: +20% precision improvement
 
-**Monitoring & Observability (Medium Priority)**
-- 📉 **Production Monitoring**
-  - Query latency tracking (p50, p95, p99)
-  - Error rate monitoring (Qdrant, Ollama, parsing)
-  - Cache hit rate metrics
-  - User query analytics (popular queries, failure patterns)
-  
-- � **Alerting System**
-  - Latency threshold alerts (>5s response time)
-  - Error rate spikes (>5% failures)
-  - System health checks (Qdrant, Ollama availability)
-  - Daily/weekly metrics reports
+**3. Evaluation Framework**
+- Test set with 50+ queries covering different scenarios
+- Metrics: Hit Rate, MRR, Precision@k, answer faithfulness
+- Automated regression testing
 
-### 🌟 Advanced Features
+**4. Monitoring Dashboard**
+- Track query latency, error rates, cache performance
+- Log slow queries (>5s) and failures
+- Simple Streamlit visualization
 
-**Semantic & Retrieval**
-- 🧠 **Semantic Chunking** - Replace fixed-size chunks with sentence-aware splitting
-  - Prevents mid-sentence cuts
-  - Preserves semantic meaning
-  - Library: LangChain `RecursiveCharacterTextSplitter`
+### 🛠️ Future Enhancements
 
-- 🔗 **Graph RAG** - Build knowledge graph from tender relationships
-  - Entity extraction (companies, locations, amounts)
-  - Relationship mapping (tender → contractor → region)
-  - Multi-hop reasoning ("Find all tenders by company X in region Y")
+**5. Semantic Chunking**
+- Replace fixed 1024-char chunks with sentence-aware splitting
+- Better context preservation
 
-- � **Multilingual Query Expansion**
-  - Auto-translate queries (German ↔ English ↔ French)
-  - Retrieve from all languages simultaneously
-  - Unified ranking across languages
+**6. Production Alerting**
+- Email/Slack notifications for errors
+- System health checks
 
-**Intelligence & Automation**
-- 🤖 **Agentic RAG** - Multi-step reasoning for complex queries
-  - "Compare tenders 20046891 and 20046893" → Multi-document analysis
-  - "What changed in Dresden tenders from 2023 to 2024?" → Temporal analysis
-  - Tool use: Calculator for budget analysis, date parsing
+**7. Multimodal Support**
+- Extract and parse tables from PDFs
+- Handle images and charts in tender documents
 
-- 💡 **Smart Summarization**
-  - Tender summaries on-demand
-  - Highlight key requirements, deadlines, budgets
-  - Multi-document summarization (region overview, category trends)
-
-- � **Proactive Notifications**
-  - Alert when new tenders match saved criteria
-  - Deadline reminders
-  - Competitive intelligence (similar past tenders)
-
-**Data & Documents**
-- 📷 **Multimodal RAG** - Handle images, tables, charts
-  - Vision LLM (LLaVA, GPT-4V) for images
-  - Table extraction and structured parsing
-  - Diagram understanding (flowcharts, blueprints, site plans)
-
-- 📊 **Structured Data Extraction**
-  - Auto-extract: budgets, deadlines, requirements, contact info
-  - Store in structured DB (PostgreSQL) alongside vectors
-  - Enable SQL queries + semantic search combination
-
-- 📄 **Document Generation**
-  - Generate bid responses from templates
-  - Compliance checklist generation
-  - Requirement matching reports
-
-**User Experience**
-- 📈 **Analytics Dashboard**
-  - Tender volume trends (by region, category, time)
-  - Budget analysis (average, min, max by category)
-  - CPV code distribution
-  - Interactive visualizations (Plotly, Streamlit charts)
-
-- 🎨 **Enhanced UI**
-  - Dark/light mode toggle
-  - Export answers to PDF/Word
-  - Bookmark/favorite queries
-  - Collaborative features (share queries, annotations)
-
-- 🗣️ **Voice Interface** (Experimental)
-  - Speech-to-text for queries
-  - Text-to-speech for answers
-  - Hands-free tender review
-
-**Integration & Deployment**
-- 🌐 **API Development**
-  - FastAPI REST API for programmatic access
-  - WebSocket support for streaming answers
-  - API key authentication
-  - Rate limiting and quota management
-
-- 🔗 **External Integrations**
-  - Tender portals (TED, Bund.de, regional platforms)
-  - SharePoint/OneDrive document sync
-  - Email notifications (SendGrid, AWS SES)
-  - Slack/Teams bot integration
-
-- � **Production Deployment**
-  - Kubernetes manifests (deployments, services, ingress)
-  - Horizontal pod autoscaling (HPA)
-  - CI/CD pipeline (GitHub Actions)
-  - Multi-environment setup (dev, staging, prod)
-
-**Enterprise & Security**
-- 🔐 **Security Hardening**
-  - User authentication (OAuth2, SSO)
-  - Role-based access control (RBAC)
-  - Audit logs (who queried what, when)
-  - Data encryption at rest and in transit
-
-- 🏢 **Multi-Tenancy**
-  - Separate collections per organization
-  - Tenant isolation
-  - Custom branding per tenant
-
-- 📦 **Backup & Disaster Recovery**
-  - Automated Qdrant backups
-  - Point-in-time recovery
-  - Geo-redundant storage
-
-### 📅 Implementation Timeline
-
-**Phase 1 (Months 1-2): Core Improvements**
-- ✅ Hybrid search implementation
-- ✅ Reranker integration
-- ✅ Basic evaluation framework
-- ✅ Monitoring dashboard
-
-**Phase 2 (Months 3-4): Quality & Scale**
-- Semantic chunking
-- A/B testing infrastructure
-- Production alerting
-- Graph RAG prototype
-
-**Phase 3 (Months 5-6): Advanced Features**
-- Agentic RAG
-- Multimodal support (tables, images)
-- Analytics dashboard
-- API development
-
-**Phase 4 (Months 7-9): Enterprise Ready**
-- Authentication & RBAC
-- Multi-tenancy
-- External integrations
-- Kubernetes deployment
+**8. Query Enhancement**
+- Expand abbreviations and handle umlaut variations
+- Better date range handling
 
 ---
-
-## 📊 Current Limitations & Known Issues
-
-**Retrieval:**
-- ❌ No hybrid search (dense-only, misses exact keyword matches)
-- ❌ No reranking (retrieved chunks not optimally ordered)
-- ❌ Fixed 512-char chunks (may split important context)
-
-**Generation:**
-- ⚠️ Small LLM (1.5B params) - occasionally struggles with complex German
-- ⚠️ No query decomposition (complex multi-part questions need manual breakdown)
-- ⚠️ Limited citation granularity (chunk-level, not sentence-level)
-
-**Monitoring:**
-- ❌ No production metrics tracking
-- ❌ No error alerting
-- ❌ No user feedback loop
-- ❌ No A/B testing infrastructure
-
-**Scale:**
-- ⚠️ Single-node Qdrant (no replication)
-- ⚠️ No caching layer (repeated queries not optimized)
-- ⚠️ GPU not utilized for LLM (CPU inference slower)
-
-**See [INTERVIEW_PREP_GUIDE.md](INTERVIEW_PREP_GUIDE.md) for detailed discussion of limitations and solutions.**
-
----
-
-## 🐛 Troubleshooting
-
-**Qdrant Connection Error:**
-```bash
-# Check Qdrant is running
-curl http://localhost:6333/collections
-# Restart if needed
-docker compose restart
-```
-
-**Empty Search Results:**
-```bash
-# Verify documents are indexed
-curl http://localhost:6333/collections/tender_chunks
-# Re-index if point_count is 0
-python scripts/embed.py --mode fresh
-```
-
-**Ollama Model Not Found:**
-```bash
-ollama list  # Check installed models
-ollama pull qwen2.5:1.5b  # Install if missing
-```
-
-**Import Errors:**
-```bash
-# Reinstall dependencies
-pip install -r requirements.txt --force-reinstall
-```
-
----
-
-## 🤝 Contributing
-
-Contributions welcome! Please:
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit changes (`git commit -m 'Add AmazingFeature'`)
-4. Push to branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
----
-
-## 📜 License
-
-MIT License - free to use and adapt with attribution.
-
----
-
-## 👤 Author
-
-**Shalin Vachheta**  
-GitHub: [@ShalinVachheta017](https://github.com/ShalinVachheta017)
-
----
-
-## 🙏 Acknowledgments
-
-- **Jina AI** - Embeddings model
-- **Qdrant** - Vector database
-- **Ollama** - Local LLM inference
-- **Streamlit** - UI framework
-- German procurement community for test data
-
----
-
-**⭐ Star this repo if you find it useful!**
-
+maybe i find someelsse to improve I will add it later
+## The project is still Ongoing ....
