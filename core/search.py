@@ -187,6 +187,83 @@ def rrf(result_sets: List[Sequence], k: int = 60):
     return sorted(keep.values(), key=lambda r: scores[str(r.id)], reverse=True)
 
 
+def search_hybrid(query_text: str, limit: Optional[int] = None, dense_weight: float = 0.7):
+    """
+    Hybrid search: combines dense vector search (70%) with BM25 sparse search (30%).
+    Uses Reciprocal Rank Fusion (RRF) to merge results.
+    
+    Args:
+        query_text: User query
+        limit: Final number of results to return (default: CFG.topk_candidate)
+        dense_weight: Weight for dense results in fusion (default: 0.7)
+                     BM25 weight will be (1 - dense_weight)
+    
+    Returns:
+        List of fused ScoredPoint objects, sorted by fused score
+    """
+    from .hybrid_search import search_bm25, reciprocal_rank_fusion
+    
+    _ensure_dims_ok()
+    limit = int(limit or getattr(CFG, "topk_candidate", 100))
+    
+    # 1. Dense vector search
+    dense_results = search_dense(query_text, limit=limit)
+    
+    # 2. BM25 sparse search
+    try:
+        bm25_results_raw = search_bm25(query_text, top_k=limit)
+        
+        # Convert BM25 results (doc_id, score) to match Qdrant point IDs
+        # We need to fetch the actual points from Qdrant for the BM25 hits
+        bm25_doc_ids = [doc_id for doc_id, _ in bm25_results_raw]
+        
+        if bm25_doc_ids:
+            # Fetch points by ID from Qdrant
+            from qdrant_client.http import models as qmodels
+            bm25_points = _client().retrieve(
+                collection_name=CFG.qdrant_collection,
+                ids=bm25_doc_ids,
+                with_payload=True,
+                with_vectors=False,
+            )
+            
+            # Create a lookup for BM25 scores
+            bm25_scores = {doc_id: score for doc_id, score in bm25_results_raw}
+            
+            # Create ScoredPoint-like objects for BM25 results
+            # We'll create a simple class to mimic ScoredPoint structure
+            class BM25ScoredPoint:
+                def __init__(self, point, bm25_score):
+                    self.id = point.id
+                    self.score = bm25_score
+                    self.payload = point.payload
+                    self.version = getattr(point, 'version', None)
+            
+            bm25_results = [
+                BM25ScoredPoint(point, bm25_scores.get(str(point.id), 0.0))
+                for point in bm25_points
+            ]
+        else:
+            bm25_results = []
+    
+    except Exception as e:
+        # If BM25 fails, fall back to dense-only
+        import logging
+        logger = logging.getLogger("core.search")
+        logger.warning(f"BM25 search failed, using dense-only: {e}")
+        bm25_results = []
+    
+    # 3. Fusion with RRF
+    if not bm25_results:
+        # No BM25 results, return dense only
+        return dense_results[:limit]
+    
+    # Use RRF to fuse both result sets
+    fused_results = rrf([dense_results, bm25_results], k=60)
+    
+    return fused_results[:limit]
+
+
 def count_points() -> Optional[int]:
     """
     Count points in the configured collection.

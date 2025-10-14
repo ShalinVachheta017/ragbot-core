@@ -286,10 +286,14 @@ def answer_with_rag(query: str, model: str, top_k: int, temperature: float, hist
     if meta_answer:
         return meta_answer, [], True
 
-    # Step 2: Dense retrieval via core.qa
+    # Step 2: Hybrid/Dense retrieval via core.qa
     hits = retrieve_candidates(query, CFG)[:top_k]
     st.session_state.last_hits = hits
-    weak = (not hits) or (float(hits[0].score) < 0.58)
+    
+    # Lower threshold for hybrid search (RRF scores are typically lower)
+    # Was 0.58, now 0.35 to account for RRF fusion
+    score_threshold = 0.35 if CFG.use_hybrid else 0.58
+    weak = (not hits) or (float(hits[0].score) < score_threshold)
 
     context_str, _ = build_context(hits if hits else [])
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -298,10 +302,10 @@ def answer_with_rag(query: str, model: str, top_k: int, temperature: float, hist
     messages.append({"role": "user", "content": f"Context:\n{context_str}\n\nQuestion:\n{query}"})
 
     if not weak:
-        logger.info("Qdrant hit")
+        logger.info(f"{'Hybrid' if CFG.use_hybrid else 'Dense'} search hit (score: {hits[0].score:.3f})")
         return llm_chat(model, messages, temperature), hits, True
 
-    logger.warning("Fallback path used")
+    logger.warning(f"Fallback path used (no good results, top score: {hits[0].score if hits else 'none'})")
     return "Not in the tender data.", hits, False
 
 def render_sources(hits):

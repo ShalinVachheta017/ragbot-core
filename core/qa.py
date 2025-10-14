@@ -1,5 +1,6 @@
 # core/qa.py
-from __future__ import annotations
+from .config import CFG
+from .search import search_dense, search_hybrid, rrf  # we'll fuse multi-query results via RRFom __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -102,9 +103,14 @@ def _should_skip_rerank(query: str) -> bool:
 def retrieve_candidates(user_text: str, cfg=CFG, limit: Optional[int] = None) -> List[Hit]:
     """
     Retrieves candidates using:
+      - Hybrid search (BM25 + dense) if cfg.use_hybrid is True
+      - Dense-only otherwise
+      
+    Optional multilingual routing:
       - multilingual default (no translation), OR
       - DE-only routing (translate then search), OR
       - dual retrieval (original + DE) fused via RRF.
+      
     Optional BGE reranking if enabled and available.
     """
     limit = int(limit or cfg.top_k)
@@ -115,17 +121,20 @@ def retrieve_candidates(user_text: str, cfg=CFG, limit: Optional[int] = None) ->
     except Exception:
         lang = "de"
 
+    # Choose search method (hybrid or dense)
+    search_fn = search_hybrid if cfg.use_hybrid else search_dense
+
     # Strategy selection
     if not cfg.force_german_retrieval and not cfg.dual_query:
-        res = search_dense(user_text, limit)
+        res = search_fn(user_text, limit)
     elif cfg.force_german_retrieval and not cfg.dual_query:
         de_q = user_text if lang == "de" else _translate_to_de(user_text)
-        res = search_dense(de_q, limit)
+        res = search_fn(de_q, limit)
     else:
         # Dual retrieval + RRF fusion
-        res_en = search_dense(user_text, limit)
+        res_en = search_fn(user_text, limit)
         de_q   = user_text if lang == "de" else _translate_to_de(user_text)
-        res_de = search_dense(de_q, limit)
+        res_de = search_fn(de_q, limit)
         res    = rrf([res_en, res_de])[:limit]
 
     hits = [_sp_to_hit(r) for r in res]

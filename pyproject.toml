@@ -1,12 +1,35 @@
+# ============================================================================
+# pyproject.toml - Python Project Configuration (PEP 518/621)
+# ============================================================================
+# This file defines project metadata, build system, and packaging configuration
+# for the multilingual-ragbot project. It's the modern standard for Python
+# project configuration (replaces setup.py).
+
+# ----------------------------------------------------------------------------
+# [project] - Core Project Metadata
+# ----------------------------------------------------------------------------
+# Defines essential information about the project: name, version, description,
+# Python version requirements, dependencies, and more.
 [project]
-name = "multilingual-ragbot"
-version = "0.1.0"
-description = "Multilingual RAG bot for tender documents"
-requires-python = ">=3.9"
+name = "multilingual-ragbot"              # Package name (used for `pip install`)
+version = "0.1.0"                         # Semantic versioning: MAJOR.MINOR.PATCH
+description = "Multilingual RAG bot for tender documents"  # Short project description
+requires-python = ">=3.9"                 # Minimum Python version required (supports 3.9+)
 
+# ----------------------------------------------------------------------------
+# [build-system] - Build Configuration (PEP 517)
+# ----------------------------------------------------------------------------
+# Specifies the build tool (setuptools) and minimum version needed to build
+# this package. This allows `pip install -e .` to work.
 [build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
+requires = ["setuptools>=61.0"]           # Build dependency: setuptools v61.0+
+build-backend = "setuptools.build_meta"   # Build backend: uses setuptools
 
+# ----------------------------------------------------------------------------
+# [tool.setuptools] - Setuptools-Specific Configuration
+# ----------------------------------------------------------------------------
+# Tells setuptools which Python packages to include when building/installing.
 [tool.setuptools]
-packages = ["core"]   # only the package you import as 'core'
+packages = ["core"]   # Only include the 'core' package directory
+                      # This makes 'from core import ...' work after install
+                      # Excludes: scripts/, ui/, data/, docs/ (not packages)
