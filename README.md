@@ -130,43 +130,109 @@ streamlit run ui/app_streamlit.py
 
 ```
 multilingual-ragbot/
-├── core/                          # Core RAG components
-│   ├── config.py                 # Configuration management
-│   ├── qa.py                     # Q&A and retrieval logic
-│   ├── search.py                 # Dense vector search
-│   ├── domain.py                 # Data models
-│   ├── io.py                     # File I/O utilities
-│   └── logger.py                 # Logging configuration
-├── ui/
-│   └── app_streamlit.py          # 🖥️ Main Streamlit interface
-├── scripts/
-│   ├── embed.py                  # Document embedding pipeline
-│   ├── ingest.py                 # Document ingestion
-│   ├── parse_excel.py            # Metadata parser
-│   └── search.py                 # Search utilities
-├── data/
-│   ├── metadata/                 # Tender metadata (cleaned_metadata.xlsx)
-│   ├── extract/                  # Extracted document text
+├── src/                           # 🔧 Source code
+│   ├── api/                      # FastAPI backend (ready for implementation)
+│   │   ├── routes/               # API endpoints
+│   │   ├── models/               # Pydantic schemas
+│   │   └── middleware/           # Auth, CORS, logging
+│   ├── core/                     # Core RAG components
+│   │   ├── config.py             # Configuration management
+│   │   ├── qa.py                 # Q&A and retrieval logic
+│   │   ├── search.py             # Dense vector search
+│   │   ├── hybrid_search.py      # BM25 + Dense hybrid search
+│   │   ├── domain.py             # Data models
+│   │   ├── io.py                 # File I/O utilities
+│   │   └── logger.py             # Logging configuration
+│   ├── knowledge_graph/          # Knowledge Graph module (ready for KG)
+│   ├── reranker/                 # Cross-encoder reranking (future)
+│   ├── monitoring/               # Metrics and observability (future)
+│   └── guardrails/               # Safety checks (future)
+│
+├── ui/                           # 🖥️ User interfaces
+│   └── streamlit/                # Streamlit web interface
+│       ├── app.py                # Main Streamlit application
+│       ├── components/           # Reusable UI components
+│       └── pages/                # Multi-page sections
+│
+├── scripts/                      # 🛠️ Operational scripts
+│   ├── data_processing/          # Data pipeline
+│   │   ├── parse_excel.py        # Metadata parser
+│   │   ├── embed.py              # Document embedding
+│   │   └── ingest.py             # Document ingestion
+│   ├── deployment/               # Deployment utilities
+│   │   ├── build_bm25_index.py   # Build BM25 index
+│   │   ├── deploy_production.py  # Production deployment
+│   │   └── search.py             # Search utilities
+│   └── evaluation/               # Evaluation scripts
+│       ├── validate_hybrid.py    # Hybrid search validation
+│       └── test_hybrid_search.py # Search testing
+│
+├── tests/                        # 🧪 Test suite
+│   ├── unit/                     # Unit tests
+│   ├── integration/              # Integration tests
+│   └── e2e/                      # End-to-end tests
+│
+├── evaluation/                   # 📊 Evaluation framework
+│   ├── datasets/                 # Test queries & ground truth
+│   │   ├── SAMPLE_QUERIES.md     # 87 test queries
+│   │   └── TEST_QUERIES.md       # Example queries
+│   ├── metrics/                  # Metrics computation (RAGAS)
+│   └── reports/                  # Generated evaluation reports
+│
+├── docs/                         # 📖 Documentation
+│   ├── guides/                   # User guides
+│   │   ├── QUICKSTART.md         # Quick start guide
+│   │   ├── PRODUCTION_GUIDE.md   # Production deployment
+│   │   ├── TESTING_GUIDE.md      # Testing procedures
+│   │   ├── INTERVIEW_PREP_GUIDE.md # Interview preparation
+│   │   └── EVALUATION_AND_SAFETY_GUIDE.md # RAGAS & guardrails
+│   ├── architecture/             # System design
+│   │   ├── SYSTEM_REVIEW.md      # Architecture review
+│   │   ├── PROJECT_TRANSFORMATION_PLAN.md # Transformation roadmap
+│   │   └── UPDATE_IMPLEMENTATION_GUIDE.md # Implementation guide
+│   ├── research/                 # Research & analysis
+│   │   ├── BASELINE_ANALYSIS.md  # Performance analysis
+│   │   ├── HYBRID_SEARCH_IMPLEMENTATION.md # Hybrid search details
+│   │   └── HYBRID_SEARCH_FIX.md  # Troubleshooting
+│   └── development/              # Developer docs
+│       ├── IMPLEMENTATION_PLAN.md # Development plan
+│       └── FILE_AUDIT.md         # Code audit
+│
+├── data/                         # � Data storage
 │   ├── raw/                      # Original documents
+│   ├── extract/                  # Extracted text
+│   ├── metadata/                 # Tender metadata
+│   ├── state/                    # BM25 index, KG files
 │   └── logs/                     # Processing logs
-├── docs/                          # 📖 Documentation
-│   ├── TESTING_GUIDE.md          # Testing procedures
-│   ├── SYSTEM_REVIEW.md          # System architecture review
-│   └── TEST_QUERIES.md           # Example test queries
-├── QUICKSTART.md                  # ⚡ Quick start guide
-├── PRODUCTION_GUIDE.md            # 🚀 Production deployment guide
-├── deploy_production.py           # One-command deployment
-├── docker-compose.yml             # Qdrant service configuration
-├── requirements.txt               # Python dependencies
-└── README.md                      # This file
+│
+├── configs/                      # ⚙️ Configuration files
+├── notebooks/                    # 📓 Jupyter notebooks
+├── docker-compose.yml            # Docker orchestration
+├── requirements.txt              # Python dependencies
+└── README.md                     # This file
 ```
 
 ## 📖 Documentation
 
-- **[QUICKSTART.md](QUICKSTART.md)** - Get started in 5 minutes
-- **[PRODUCTION_GUIDE.md](PRODUCTION_GUIDE.md)** - Production deployment
-- **[docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md)** - Testing procedures
-- **[docs/TEST_QUERIES.md](docs/TEST_QUERIES.md)** - Example queries
+### 🚀 Getting Started
+- **[docs/guides/QUICKSTART.md](docs/guides/QUICKSTART.md)** - Get started in 5 minutes
+- **[docs/guides/PRODUCTION_GUIDE.md](docs/guides/PRODUCTION_GUIDE.md)** - Production deployment guide
+- **[docs/guides/TESTING_GUIDE.md](docs/guides/TESTING_GUIDE.md)** - Testing procedures
+
+### 🏗️ Architecture & Design
+- **[docs/architecture/SYSTEM_REVIEW.md](docs/architecture/SYSTEM_REVIEW.md)** - System architecture overview
+- **[docs/architecture/PROJECT_TRANSFORMATION_PLAN.md](docs/architecture/PROJECT_TRANSFORMATION_PLAN.md)** - Transformation roadmap with advanced features
+- **[docs/architecture/UPDATE_IMPLEMENTATION_GUIDE.md](docs/architecture/UPDATE_IMPLEMENTATION_GUIDE.md)** - Step-by-step implementation guide
+
+### 🔬 Research & Analysis
+- **[docs/research/BASELINE_ANALYSIS.md](docs/research/BASELINE_ANALYSIS.md)** - Performance analysis and benchmarks
+- **[docs/research/HYBRID_SEARCH_IMPLEMENTATION.md](docs/research/HYBRID_SEARCH_IMPLEMENTATION.md)** - Hybrid search implementation details
+- **[docs/research/EVALUATION_STRATEGY.md](docs/research/EVALUATION_STRATEGY.md)** - Evaluation methodology
+
+### 🎯 Advanced Topics
+- **[docs/guides/EVALUATION_AND_SAFETY_GUIDE.md](docs/guides/EVALUATION_AND_SAFETY_GUIDE.md)** - RAGAS evaluation framework & guardrails
+- **[docs/guides/INTERVIEW_PREP_GUIDE.md](docs/guides/INTERVIEW_PREP_GUIDE.md)** - Interview preparation guide
+- **[evaluation/datasets/SAMPLE_QUERIES.md](evaluation/datasets/SAMPLE_QUERIES.md)** - 87 test queries with categories
 
 ## 🎯 Example Queries
 
